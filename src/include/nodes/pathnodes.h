@@ -27,7 +27,7 @@
 #include "nodes/plannerconfig.h"
 #include "cdb/cdbpathlocus.h"
 #include "foreign/foreign.h"
-
+#include "utils/rel.h"
 
 /*
  * Relids
@@ -428,6 +428,7 @@ struct PlannerInfo
 	bool		hasHavingQual;	/* true if havingQual was non-null */
 	bool		hasPseudoConstantQuals; /* true if any RestrictInfo has
 										 * pseudoconstant = true */
+	bool		hasAlternativeSubPlans; /* true if we've made any of those */
 	bool		hasRecursion;	/* true if planning a recursive WITH item */
 
 	/* These fields are used only when hasRecursion is true: */
@@ -453,6 +454,10 @@ struct PlannerInfo
 	 * instead, for performance.
 	 */
 	List	   *partition_selector_candidates;
+
+	/* These fields are workspace for setrefs.c */
+	bool	   *isAltSubplan;	/* array corresponding to glob->subplans */
+	bool	   *isUsedSubplan;	/* array corresponding to glob->subplans */
 
 	/* optional private data for join_search_hook, e.g., GEQO */
 	void	   *join_search_private;
@@ -807,6 +812,18 @@ typedef enum RelOptKind
 	 (rel)->reloptkind == RELOPT_OTHER_JOINREL || \
 	 (rel)->reloptkind == RELOPT_OTHER_UPPER_REL)
 
+/*
+ * GPDB: Storage attributes associated with append-optimized tables.
+ */
+typedef struct AOStorageInfo
+{
+	/* table level storage info */
+	int						compresslevel;
+	char					compresstype[NAMEDATALEN];
+	/* per column storage info (NULL for row-oriented tables) */
+	struct AOStorageInfo	*col_storage_infos;
+} AOStorageInfo;
+
 typedef struct RelOptInfo
 {
 	NodeTag		type;
@@ -910,6 +927,8 @@ typedef struct RelOptInfo
 	 */
 	List	   *upperrestrictinfo;		/* RestrictInfo structures (if base
 										 * rel) */
+
+	AOStorageInfo *ao_storage_info;		/* GPDB: Storage info for AO/CO tables */
 } RelOptInfo;
 
 /*

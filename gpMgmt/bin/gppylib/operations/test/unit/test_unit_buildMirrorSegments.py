@@ -3,11 +3,13 @@
 # Copyright (c) Greenplum Inc 2008. All Rights Reserved.
 #
 import os
+import re
 from collections import OrderedDict
 import io
 import logging
 import shutil
 import tempfile
+from datetime import datetime
 
 
 from mock import ANY, call, patch, Mock, mock_open
@@ -17,9 +19,9 @@ from gppylib.commands.base import CommandResult, LocalExecutionContext
 
 from gppylib.gparray import Segment, GpArray
 from gppylib.mainUtils import ExceptionNoStackTraceNeeded
-from gppylib.operations.buildMirrorSegments import GpMirrorToBuild, GpMirrorListToBuild, GpStopSegmentDirectoryDirective
+from gppylib.operations.buildMirrorSegments import GpMirrorToBuild, GpMirrorListToBuild, GpStopSegmentDirectoryDirective, get_recovery_progress_pattern
 from gppylib.system import configurationInterface
-from test.unit.gp_unittest import Contains, GpTestCase
+from gppylib.test.unit.gp_unittest import Contains, GpTestCase
 
 from gppylib.recoveryinfo import RecoveryInfo, RecoveryResult
 
@@ -56,7 +58,7 @@ class BuildMirrorsTestCase(GpTestCase):
             patch('gppylib.operations.buildMirrorSegments.gplog.get_logger_dir', return_value='/tmp/logdir'),
             patch('gppylib.operations.buildMirrorSegments.gplog.logging_is_verbose', return_value=False),
             patch('gppylib.operations.buildMirrorSegments.read_era', self.mock_gp_era),
-            patch('gppylib.recoveryinfo.RecoveryResult.print_bb_rewind_update_and_start_errors'),
+            patch('gppylib.recoveryinfo.RecoveryResult.print_bb_rewind_differential_update_and_start_errors'),
             patch('gppylib.recoveryinfo.RecoveryResult.print_setup_recovery_errors'),
             patch('gppylib.operations.buildMirrorSegments.dbconn')
         ])
@@ -77,12 +79,14 @@ class BuildMirrorsTestCase(GpTestCase):
         self.progress_file_dbid2='/tmp/progress_file2'
         self.progress_file_dbid3='/tmp/progress_file3'
         self.progress_file_dbid4='/tmp/progress_file4'
+        self.progress_file_dbid5 = '/tmp/progress_file5'
 
         self.gpEnv = Mock()
         self.gpArray = GpArray([self.coordinator, self.primary, self.mirror])
-        self.recovery_info1 = RecoveryInfo('/datadir2', 7001, 2, 'source_host_for_dbid2', 7002, True, self.progress_file_dbid2)
-        self.recovery_info2 = RecoveryInfo('/datadir3', 7003, 3, 'source_host_for_dbid3', 7004, True, self.progress_file_dbid3)
-        self.recovery_info3 = RecoveryInfo('/datadir4', 7005, 4, 'source_host_for_dbid4', 7006, True, self.progress_file_dbid4)
+        self.recovery_info1 = RecoveryInfo('/datadir2', 7001, 2, 'source_host_for_dbid2', 7002, 'source_dir_for_dbid2', True, False, self.progress_file_dbid2)
+        self.recovery_info2 = RecoveryInfo('/datadir3', 7003, 3, 'source_host_for_dbid3', 7004, 'source_dir_for_dbid3', True, False, self.progress_file_dbid3)
+        self.recovery_info3 = RecoveryInfo('/datadir4', 7005, 4, 'source_host_for_dbid4', 7006, 'source_dir_for_dbid4', True, False, self.progress_file_dbid4)
+        self.recovery_info4 = RecoveryInfo('/datadir5', 7006, 5, 'source_host_for_dbid5', 7007, 'source_dir_for_dbid5', False, True, self.progress_file_dbid5)
 
     def tearDown(self):
         super(BuildMirrorsTestCase, self).tearDown()
@@ -105,9 +109,9 @@ class BuildMirrorsTestCase(GpTestCase):
 
     def _setup_recovery_mocks(self, host_errors=[]):
         host1_recovery_output = gp.GpSegRecovery('test recover 1', 'dummy_info1', '/tmp/log1/', False, 1,
-                                                 'host1', 'dummy_era1', True)
+                                                 'host1', 'dummy_era1', True, None)
         host2_recovery_output = gp.GpSegRecovery('test recover 2', 'dummy_info2', '/tmp/log2/', True, 2,
-                                                 'host2', 'dummy_era2', False)
+                                                 'host2', 'dummy_era2', False, None)
 
         host1_result = CommandResult(0, ''.encode(), ''.encode(), True, False)
         host2_result = CommandResult(0, ''.encode(), ''.encode(), True, False)
@@ -152,7 +156,7 @@ class BuildMirrorsTestCase(GpTestCase):
 
     def _assert_setup_recovery(self):
         self.assertEqual(1, RecoveryResult.print_setup_recovery_errors.call_count)
-        self.assertEqual(0, RecoveryResult.print_bb_rewind_update_and_start_errors.call_count)
+        self.assertEqual(0, RecoveryResult.print_bb_rewind_differential_update_and_start_errors.call_count)
         self.assertEqual([], self.mock_logger.info.call_args_list)
         self.assertEqual([], self.mock_logger.error.call_args_list)
 
@@ -161,7 +165,7 @@ class BuildMirrorsTestCase(GpTestCase):
         self.assertEqual(expected_info_msgs, self.mock_logger.info.call_args_list)
         self.assertEqual([], self.mock_logger.error.call_args_list)
         self.assertEqual(0, RecoveryResult.print_setup_recovery_errors.call_count)
-        self.assertEqual(1, RecoveryResult.print_bb_rewind_update_and_start_errors.call_count)
+        self.assertEqual(1, RecoveryResult.print_bb_rewind_differential_update_and_start_errors.call_count)
 
     def _run_buildMirrors(self, mirrors_to_build, action):
         self.mock_logger = Mock(spec=['log', 'warn', 'info', 'debug', 'error', 'warning', 'fatal'])
@@ -232,12 +236,12 @@ class BuildMirrorsTestCase(GpTestCase):
                         "live": self._create_primary(dbid='3'),
                         "failover": self._create_mirror(dbid='4'),
                         "forceFull": True,
-                    }
+                    },
                 ]
 
                 mirrors_to_build = []
                 for test in tests:
-                    mirrors_to_build.append(GpMirrorToBuild(None, test["live"], test["failover"], test["forceFull"]))
+                    mirrors_to_build.append(GpMirrorToBuild(None, test["live"], test["failover"], test["forceFull"], test.get("diff", False)))
                 build_mirrors_obj = self._run_buildMirrors(mirrors_to_build, action)
 
                 self.assertEqual(2, self.mock_logger.info.call_count)
@@ -285,7 +289,7 @@ class BuildMirrorsTestCase(GpTestCase):
                 expected_segs_to_markdown = []
                 for test in tests:
                     mirrors_to_build.append(GpMirrorToBuild(test["failed"], test["live"], None,
-                                                            test["forceFull"]))
+                                                            test["forceFull"], test.get("diff", False)))
                     expected_segs_to_stop.append(test["failed"])
                     if 'is_failed_segment_up' in test and test["is_failed_segment_up"]:
                         expected_segs_to_markdown.append(test['failed'])
@@ -342,7 +346,7 @@ class BuildMirrorsTestCase(GpTestCase):
 
                 for test in tests:
                     mirrors_to_build.append(GpMirrorToBuild(test["failed"], test["live"], test["failover"],
-                                                            test["forceFull"]))
+                                                            test["forceFull"], test.get("diff", False)))
                     #TODO better way to check for this condition
                     if not test["failed"].unreachable:
                         expected_segs_to_stop.append(test["failed"])
@@ -373,7 +377,7 @@ class BuildMirrorsTestCase(GpTestCase):
                 failover = self._create_primary(host='sdw3')
 
                 build_mirrors_obj = GpMirrorListToBuild(
-                    toBuild=[GpMirrorToBuild(failed, live, failover, False)],
+                    toBuild=[GpMirrorToBuild(failed, live, failover, False, False)],
                     pool=None,
                     quiet=True,
                     parallelDegree=0,
@@ -421,7 +425,7 @@ class BuildMirrorsTestCase(GpTestCase):
             }
         ]
         for test in tests:
-            mirror_to_build = GpMirrorToBuild(test["failed"], test["live"], test["failover"], test["forceFull"])
+            mirror_to_build = GpMirrorToBuild(test["failed"], test["live"], test["failover"], test["forceFull"], test.get("diff", False))
             build_mirrors_obj = GpMirrorListToBuild(
                 toBuild=[mirror_to_build,],
                 pool=None,
@@ -451,13 +455,17 @@ class BuildMirrorsTestCase(GpTestCase):
         failed4 = self._create_primary(dbid='5')
         live4 = self._create_mirror(dbid='7')
 
-        inplace_full1 = GpMirrorToBuild(failed1, live1, None, True)
-        not_inplace_full = GpMirrorToBuild(failed2, live2, failover2, True)
-        inplace_full2 = GpMirrorToBuild(failed3, live3, None, True)
-        inplace_not_full = GpMirrorToBuild(failed4, live4, None, False)
+        failed5 = self._create_primary(dbid='8')
+        live5 = self._create_mirror(dbid='9')
+
+        inplace_full1 = GpMirrorToBuild(failed1, live1, None, True, False)
+        not_inplace_full = GpMirrorToBuild(failed2, live2, failover2, True, False)
+        inplace_full2 = GpMirrorToBuild(failed3, live3, None, True, False)
+        inplace_not_full = GpMirrorToBuild(failed4, live4, None, False, False)
+        inplace_differential = GpMirrorToBuild(failed5, live5, None, False, True)
 
         build_mirrors_obj = GpMirrorListToBuild(
-            toBuild=[inplace_full1, not_inplace_full, inplace_full2, inplace_not_full],
+            toBuild=[inplace_full1, not_inplace_full, inplace_full2, inplace_not_full, inplace_differential],
             pool=None,
             quiet=True,
             parallelDegree=0,
@@ -469,7 +477,7 @@ class BuildMirrorsTestCase(GpTestCase):
         build_mirrors_obj._clean_up_failed_segments()
 
         self.mock_get_segments_by_hostname.assert_called_once_with([failed1, failed3])
-        self.mock_logger.info.called_once_with('"Cleaning files from 2 segment(s)')
+        self.mock_logger.info.assert_called_once_with('Cleaning files from 2 segment(s)')
 
     def test_clean_up_failed_segments_no_segs_to_cleanup(self):
         failed2 = self._create_primary(dbid='3', status='d')
@@ -479,8 +487,8 @@ class BuildMirrorsTestCase(GpTestCase):
         failed4 = self._create_primary(dbid='5')
         live4 = self._create_mirror(dbid='7')
 
-        not_inplace_full = GpMirrorToBuild(failed2, live2, failover2, True)
-        inplace_not_full = GpMirrorToBuild(failed4, live4, None, False)
+        not_inplace_full = GpMirrorToBuild(failed2, live2, failover2, True, False)
+        inplace_not_full = GpMirrorToBuild(failed4, live4, None, False, False)
 
         build_mirrors_obj = GpMirrorListToBuild(
             toBuild=[not_inplace_full, inplace_not_full],
@@ -531,15 +539,18 @@ class BuildMirrorsTestCase(GpTestCase):
 
         self.default_build_mirrors_obj._run_recovery(self.default_action_name, recovery_info, self.gpEnv)
 
-        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True), call(ANY, suppressErrorCheck=False)],
+        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True)],
                          self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list)
 
         seg_recovery_cmds = self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list[0][0][0]
         progress_cmds = self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list[0][1]['progressCmds']
-        rm_progress_cmds = self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list[1][0][0]
 
         #TODO fix formatting
-        expected_recovery_cmd_strs = ["""$GPHOME/sbin/gpsegrecovery.py -c '[{"target_datadir": "/datadir2", "target_port": 7001, "target_segment_dbid": 2, "source_hostname": "source_host_for_dbid2", "source_port": 7002, "is_full_recovery": true, "progress_file": "/tmp/progress_file2"}]' -l /tmp/logdir -b 64 --era=dummy_era""", """$GPHOME/sbin/gpsegrecovery.py -c '[{"target_datadir": "/datadir3", "target_port": 7003, "target_segment_dbid": 3, "source_hostname": "source_host_for_dbid3", "source_port": 7004, "is_full_recovery": true, "progress_file": "/tmp/progress_file3"}, {"target_datadir": "/datadir4", "target_port": 7005, "target_segment_dbid": 4, "source_hostname": "source_host_for_dbid4", "source_port": 7006, "is_full_recovery": true, "progress_file": "/tmp/progress_file4"}]' -l /tmp/logdir -b 64 --era=dummy_era"""]
+        expected_recovery_cmd_strs = [
+            """$GPHOME/sbin/gpsegrecovery.py -c '[{"target_datadir": "/datadir2", "target_port": 7001, "target_segment_dbid": 2, "source_hostname": "source_host_for_dbid2", "source_port": 7002, "source_datadir": "source_dir_for_dbid2", "is_full_recovery": true, "is_differential_recovery": false, "progress_file": "/tmp/progress_file2"}]' -l /tmp/logdir -b 64 --era=dummy_era""",
+            """$GPHOME/sbin/gpsegrecovery.py -c '[{"target_datadir": "/datadir3", "target_port": 7003, "target_segment_dbid": 3, "source_hostname": "source_host_for_dbid3", "source_port": 7004, "source_datadir": "source_dir_for_dbid3", "is_full_recovery": true, "is_differential_recovery": false, "progress_file": "/tmp/progress_file3"}, {"target_datadir": "/datadir4", "target_port": 7005, "target_segment_dbid": 4, "source_hostname": "source_host_for_dbid4", "source_port": 7006, "source_datadir": "source_dir_for_dbid4", "is_full_recovery": true, "is_differential_recovery": false, "progress_file": "/tmp/progress_file4"}]' -l /tmp/logdir -b 64 --era=dummy_era"""]
+
+
         self.assertEqual(2, len(seg_recovery_cmds))
         self.assertEqual('host1', seg_recovery_cmds[0].remoteHost)
         self.assertEqual(sorted(expected_recovery_cmd_strs[0]), sorted(seg_recovery_cmds[0].cmdStr))
@@ -558,18 +569,10 @@ class BuildMirrorsTestCase(GpTestCase):
                          progress_cmds[2].cmdStr)
         self.assertEqual(1, self.mock_gp_era.call_count)
 
-        self.assertEqual(3, len(rm_progress_cmds))
-        self.assertEqual("host1", rm_progress_cmds[0].remoteHost)
-        self.assertEqual("rm -f /tmp/progress_file2", rm_progress_cmds[0].cmdStr)
-        self.assertEqual("host2", rm_progress_cmds[1].remoteHost)
-        self.assertEqual("rm -f /tmp/progress_file3", rm_progress_cmds[1].cmdStr)
-        self.assertEqual("host2", rm_progress_cmds[2].remoteHost)
-        self.assertEqual("rm -f /tmp/progress_file4", rm_progress_cmds[2].cmdStr)
-
         self._assert_run_recovery()
 
     def test_run_recovery_invalid_errors(self):
-        recovery_info = {'host1': [self.recovery_info1, self.recovery_info2], 'host2': [self.recovery_info3]}
+        recovery_info = {'host1': [self.recovery_info1, self.recovery_info2], 'host2': [self.recovery_info3, self.recovery_info4]}
         host1_error = 'invalid error1'
         host2_error = ''
         self._setup_recovery_mocks([host1_error, host2_error])
@@ -584,11 +587,8 @@ class BuildMirrorsTestCase(GpTestCase):
         self._setup_recovery_mocks([host1_error, host2_error])
 
         self.default_build_mirrors_obj._run_recovery(self.default_action_name, recovery_info, self.gpEnv)
-        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True), call(ANY, suppressErrorCheck=False)],
+        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True)],
                          self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list)
-        rm_progress_cmds = self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list[1][0][0]
-
-        self.assertEqual(0, len(rm_progress_cmds))
 
         self._assert_run_recovery()
 
@@ -599,28 +599,33 @@ class BuildMirrorsTestCase(GpTestCase):
         self._setup_recovery_mocks([host1_error, host2_error])
 
         self.default_build_mirrors_obj._run_recovery(self.default_action_name, recovery_info, self.gpEnv)
-        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True), call(ANY, suppressErrorCheck=False)],
+        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True)],
                          self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list)
-        rm_progress_cmds = self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list[1][0][0]
 
-        self.assertEqual(1, len(rm_progress_cmds))
-        self.assertEqual("host2", rm_progress_cmds[0].remoteHost)
-        self.assertEqual("rm -f /tmp/progress_file3", rm_progress_cmds[0].cmdStr)
+        self._assert_run_recovery()
+
+    def test_run_recovery_some_dbids_fail_all_bb_rewind_differential_errors(self):
+        recovery_info = {'host1': [self.recovery_info1, self.recovery_info4], 'host2': [self.recovery_info2, self.recovery_info3]}
+        host1_error = '[{"error_type": "full", "error_msg":"some error for dbid 2", "dbid": 2, "datadir": "/datadir2", "port": 7001, "progress_file": "/tmp/progress2"}, ' \
+                      '{"error_type": "differential", "error_msg":"some error for dbid 5", "dbid": 5, "datadir": "/datadir5", "port": 7006, "progress_file": "/tmp/progress5"}]'
+        host2_error = '[{"error_type": "full", "error_msg":"some error for dbid 4", "dbid": 4, "datadir": "/datadir4", "port": 7005, "progress_file": "/tmp/progress4"}]'
+        self._setup_recovery_mocks([host1_error, host2_error])
+
+        self.default_build_mirrors_obj._run_recovery(self.default_action_name, recovery_info, self.gpEnv)
+        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True)],
+                         self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list)
 
         self._assert_run_recovery()
 
     def test_run_recovery_all_dbids_fail_all_start_errors(self):
-        recovery_info = {'host1': [self.recovery_info1], 'host2': [self.recovery_info2, self.recovery_info3]}
+        recovery_info = {'host1': [self.recovery_info1, self.recovery_info4], 'host2': [self.recovery_info2, self.recovery_info3]}
         host1_error = '[{"error_type": "start", "error_msg":"some error for dbid 2", "dbid": 2, "datadir": "/datadir2", "port": 7001, "progress_file": "/tmp/progress2"}, ' \
                       '{"error_type": "start", "error_msg":"some error for dbid 3", "dbid": 3, "datadir": "/datadir3", "port": 7003, "progress_file": "/tmp/progress3"}]'
         host2_error = '[{"error_type": "start", "error_msg":"some error for dbid 4", "dbid": 4, "datadir": "/datadir4", "port": 7005, "progress_file": "/tmp/progress4"}]'
         self._setup_recovery_mocks([host1_error, host2_error])
         self.default_build_mirrors_obj._run_recovery(self.default_action_name, recovery_info, self.gpEnv)
-        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True), call(ANY, suppressErrorCheck=False)],
+        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True)],
                          self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list)
-        rm_cmds = self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list[1][0][0]
-
-        self.assertEqual(3, len(rm_cmds))
         self._assert_run_recovery()
 
     def test_run_recovery_some_dbids_fail_all_start_errors(self):
@@ -631,55 +636,42 @@ class BuildMirrorsTestCase(GpTestCase):
         self._setup_recovery_mocks([host1_error, host2_error])
 
         self.default_build_mirrors_obj._run_recovery(self.default_action_name, recovery_info, self.gpEnv)
-        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True), call(ANY, suppressErrorCheck=False)],
+        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True)],
                          self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list)
-        rm_progress_cmds = self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list[1][0][0]
-        self.assertEqual(3, len(rm_progress_cmds))
 
         self._assert_run_recovery()
 
-    def test_run_recovery_all_dbids_fail_bb_rewind_and_start_errors(self):
-        recovery_info = {'host1': [self.recovery_info1, self.recovery_info2], 'host2': [self.recovery_info3]}
+    def test_run_recovery_all_dbids_fail_bb_rewind_differential_and_start_errors(self):
+        recovery_info = {'host1': [self.recovery_info1, self.recovery_info2], 'host2': [self.recovery_info3, self.recovery_info4]}
         host1_error = '[{"error_type": "full",  "error_msg":"some error for dbid 2", "dbid": 2, "datadir": "/datadir2", "port": 7001, "progress_file": "/tmp/progress2"}, ' \
                       '{"error_type": "start",  "error_msg":"some error for dbid 3", "dbid": 3, "datadir": "/datadir3", "port": 7003, "progress_file": "/tmp/progress3"}]'
-        host2_error = '[{"error_type": "full",  "error_msg":"some error for dbid 4", "dbid": 4, "datadir": "/datadir4", "port": 7005, "progress_file": "/tmp/progress4"}]'
+        host2_error = '[{"error_type": "full",  "error_msg":"some error for dbid 4", "dbid": 4, "datadir": "/datadir4", "port": 7005, "progress_file": "/tmp/progress4"},' \
+                      '{"error_type": "differential", "error_msg":"some error for dbid 5", "dbid": 5, "datadir": "/datadir5", "port": 7006, "progress_file": "/tmp/progress5"}]'
         self._setup_recovery_mocks([host1_error, host2_error])
 
         self.default_build_mirrors_obj._run_recovery(self.default_action_name, recovery_info, self.gpEnv)
 
-        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True), call(ANY, suppressErrorCheck=False)],
+        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True)],
                          self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list)
-        rm_progress_cmds = self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list[1][0][0]
-
-        # Since start passed for dbid:3, we should have deleted it's progress file
-        self.assertEqual(1, len(rm_progress_cmds))
-        self.assertEqual("host1", rm_progress_cmds[0].remoteHost)
-        self.assertEqual("rm -f /tmp/progress_file3", rm_progress_cmds[0].cmdStr)
 
         self._assert_run_recovery()
 
-    def test_run_recovery_all_dbids_fail_bb_rewind_and_default_errors(self):
+    def test_run_recovery_all_dbids_fail_bb_rewind_differential_and_default_errors(self):
         recovery_info = OrderedDict()  # We use ordered dict to deterministically assert the side effects of _run_recovery
-        recovery_info['host1'] = [self.recovery_info1]
+        recovery_info['host1'] = [self.recovery_info1, self.recovery_info4]
         recovery_info['host2'] = [self.recovery_info2, self.recovery_info3]
 
         # recovery_info = OrderedDict({'host1': [self.recovery_info1], 'host2': [self.recovery_info2, self.recovery_info3]})
         host1_error = '[{"error_type": "start",  "error_msg":"some error for dbid 2", "dbid": 2, "datadir": "/datadir2", "port": 7001, "progress_file": "/tmp/progress2"}, ' \
-                      '{"error_type": "default",  "error_msg":"some error for dbid 3", "dbid": 3, "datadir": "/datadir3", "port": 7003, "progress_file": "/tmp/progress3"}]'
+                      '{"error_type": "default",  "error_msg":"some error for dbid 3", "dbid": 3, "datadir": "/datadir3", "port": 7003, "progress_file": "/tmp/progress3"},' \
+                      '{"error_type": "differential", "error_msg":"some error for dbid 5", "dbid": 5, "datadir": "/datadir5", "port": 7006, "progress_file": "/tmp/progress5"}]'
         host2_error = '[{"error_type": "incremental",  "error_msg":"some error for dbid 4", "dbid": 4, "datadir": "/datadir4", "port": 7005, "progress_file": "/tmp/progress4"}]'
         self._setup_recovery_mocks([host1_error, host2_error])
 
         self.default_build_mirrors_obj._run_recovery(self.default_action_name, recovery_info, self.gpEnv)
 
-        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True), call(ANY, suppressErrorCheck=False)],
+        self.assertEqual([call(ANY, progressCmds=ANY, suppressErrorCheck=True)],
                          self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list)
-        rm_progress_cmds = self.default_build_mirrors_obj._GpMirrorListToBuild__runWaitAndCheckWorkerPoolForErrorsAndClear.call_args_list[1][0][0]
-
-        self.assertEqual(2, len(rm_progress_cmds))
-        self.assertEqual("host1", rm_progress_cmds[0].remoteHost)
-        self.assertEqual("host2", rm_progress_cmds[1].remoteHost)
-        self.assertEqual("rm -f /tmp/progress_file2", rm_progress_cmds[0].cmdStr)
-        self.assertEqual("rm -f /tmp/progress_file3", rm_progress_cmds[1].cmdStr)
 
         self._assert_run_recovery()
 
@@ -742,6 +734,25 @@ class BuildMirrorsTestCase(GpTestCase):
     def test_run_backout_all_dbids_have_incremental_errors(self):
         host1_error = '[{"error_type": "incremental", "error_msg":"some error for dbid 2", "dbid": 2, "datadir": "/datadir2", "port": 7001, "progress_file": "/tmp/progress2"}, ' \
                       '{"error_type": "incremental", "error_msg":"some error for dbid 3", "dbid": 3, "datadir": "/datadir3", "port": 7003, "progress_file": "/tmp/progress3"}]'
+
+        host1_result = CommandResult(1, 'failed 1'.encode(), host1_error.encode(), True, False)
+        host2_result = CommandResult(0, b"", b"", True, False)
+        host1_recovery_output = Mock()
+        host2_recovery_output = Mock()
+        host1_recovery_output.get_results = Mock(return_value=host1_result)
+        host2_recovery_output.get_results = Mock(return_value=host2_result)
+
+        recovery_results = RecoveryResult(self.default_action_name, [host1_recovery_output, host2_recovery_output],
+                                          self.mock_logger)
+        self.default_build_mirrors_obj._revert_config_update(recovery_results, self.test_backout_map)
+
+        self.assertEqual(0, self.mock_logger.debug.call_count)
+        self.assertEqual(0, self.mock_dbconn.execSQL.call_count)
+        self.assertEqual(0, self.mock_dbconn.executeUpdateOrInsert.call_count)
+
+    def test_run_backout_all_dbids_have_differential_errors(self):
+        host1_error = '[{"error_type": "differential", "error_msg":"some error for dbid 2", "dbid": 2, "datadir": "/datadir2", "port": 7001, "progress_file": "/tmp/progress2"}, ' \
+                      '{"error_type": "differential", "error_msg":"some error for dbid 3", "dbid": 3, "datadir": "/datadir3", "port": 7003, "progress_file": "/tmp/progress3"}]'
 
         host1_result = CommandResult(1, 'failed 1'.encode(), host1_error.encode(), True, False)
         host2_result = CommandResult(0, b"", b"", True, False)
@@ -945,10 +956,13 @@ class SegmentProgressTestCase(GpTestCase):
         )
         self.tmp_log_dir = tempfile.mkdtemp()
         self.apply_patches([
-            patch('recoveryinfo.gplog.get_logger_dir', return_value=self.tmp_log_dir),
-            patch('gppylib.operations.buildMirrorSegments.os.remove')
+            patch('gppylib.recoveryinfo.gplog.get_logger_dir', return_value=self.tmp_log_dir),
+            patch('gppylib.operations.buildMirrorSegments.os.remove'),
+            patch('gppylib.operations.buildMirrorSegments.datetime')
         ])
         self.mock_os_remove = self.get_mock_from_apply_patch("remove")
+        self.mock_datetime = self.get_mock_from_apply_patch("datetime")
+        self.mock_datetime.now.return_value = datetime(2024, 3, 19, 16, 5, 38, 202000)
         self.combined_progress_file = "{}/recovery_progress.file".format(self.tmp_log_dir)
 
     def tearDown(self):
@@ -967,16 +981,46 @@ class SegmentProgressTestCase(GpTestCase):
     def test_command_output_is_displayed_once_after_worker_pool_completes(self):
         cmd1 = self.create_command('localhost', 2, './pg_basebackup.23432', "string 1\n")
         cmd2 = self.create_command('host2', 4, './pg_basebackup.234324', "string 2\n")
+        cmd3 = self.create_command('host3', 5, './rsync.234324', "string 3\n")
 
         outfile = io.StringIO()
         self.pool.join.return_value = True
-        self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2], outfile=outfile)
+        self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2, cmd3], outfile=outfile)
 
         results = outfile.getvalue()
         self.assertEqual(results, (
-            'localhost (dbid 2): string 1\n'
-            'host2 (dbid 4): string 2\n'
+            '2024-03-19 16:05:38.202000: localhost (dbid 2): string 1\n'
+            '2024-03-19 16:05:38.202000: host2 (dbid 4): string 2\n'
+            '2024-03-19 16:05:38.202000: host3 (dbid 5): string 3\n'
         ))
+
+    def test_recovery_pattern_returned_matches_recovery_result(self):
+        cmd = self.create_command('localhost', 2, './pg_basebackup.23432', "1164848/1371715 kB (84%)\n")
+
+        outfile = io.StringIO()
+        self.pool.join.return_value = True
+        self.buildMirrorSegs._join_and_show_segment_progress([cmd], outfile=outfile)
+
+        results = outfile.getvalue()
+        self.assertEqual(results, (
+            '2024-03-19 16:05:38.202000: localhost (dbid 2): 1164848/1371715 kB (84%)\n'
+        ))
+        pattern = get_recovery_progress_pattern()
+        self.assertTrue((re.search(pattern, cmd.get_results.return_value.stdout)) is not None)
+
+    def test_recovery_pattern_returned_not_matches_recovery_result(self):
+        cmd = self.create_command('localhost', 2, './pg_basebackup.23432', "1164848/1371715 kB (84%)\n")
+
+        outfile = io.StringIO()
+        self.pool.join.return_value = True
+        self.buildMirrorSegs._join_and_show_segment_progress([cmd], outfile=outfile)
+
+        results = outfile.getvalue()
+        self.assertEqual(results, (
+            '2024-03-19 16:05:38.202000: localhost (dbid 2): 1164848/1371715 kB (84%)\n'
+        ))
+        pattern = get_recovery_progress_pattern('differential')
+        self.assertTrue((re.search(pattern, cmd.get_results.return_value.stdout)) is None)
 
     def test_command_output_is_displayed_once_for_every_blocked_join(self):
         cmd = self.create_command('localhost', 2, './pg_basebackup.23432', "string 1\n")
@@ -989,8 +1033,8 @@ class SegmentProgressTestCase(GpTestCase):
 
         results = outfile.getvalue()
         self.assertEqual(results, (
-            'localhost (dbid 2): string 1\n'
-            'localhost (dbid 2): string 2\n'
+            '2024-03-19 16:05:38.202000: localhost (dbid 2): string 1\n'
+            '2024-03-19 16:05:38.202000: localhost (dbid 2): string 2\n'
         ))
 
     def test_inplace_display_uses_ansi_escapes_to_overwrite_previous_output(self):
@@ -1007,63 +1051,70 @@ class SegmentProgressTestCase(GpTestCase):
 
         results = outfile.getvalue()
         self.assertEqual(results, (
-            'localhost (dbid 2): string 1\x1b[K\n'
-            'host2 (dbid 4): string 3\x1b[K\n'
+            '2024-03-19 16:05:38.202000: localhost (dbid 2): string 1\x1b[K\n'
+            '2024-03-19 16:05:38.202000: host2 (dbid 4): string 3\x1b[K\n'
             '\x1b[2A'
-            'localhost (dbid 2): string 2\x1b[K\n'
-            'host2 (dbid 4): string 4\x1b[K\n'
+            '2024-03-19 16:05:38.202000: localhost (dbid 2): string 2\x1b[K\n'
+            '2024-03-19 16:05:38.202000: host2 (dbid 4): string 4\x1b[K\n'
         ))
 
     def test_errors_during_command_execution_are_displayed(self):
         cmd1 = self.create_command('localhost', 2, './pg_basebackup.234324', stderr="some error\n")
         cmd2 = self.create_command('host2', 4, './pg_basebackup.234324', stderr='')
+        cmd3 = self.create_command('host3', 5, './rsync.234324', stderr='rsync failed')
 
         cmd1.run.side_effect = base.ExecutionError("Some exception", cmd1)
         cmd2.run.side_effect = base.ExecutionError("Some exception", cmd2)
+        cmd3.run.side_effect = base.ExecutionError("Some exception", cmd3)
 
         outfile = io.StringIO()
         self.pool.join.return_value = True
-        self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2], outfile=outfile)
+        self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2, cmd3], outfile=outfile)
 
         results = outfile.getvalue()
         self.assertEqual(results, (
-            'localhost (dbid 2): some error\n'
-            'host2 (dbid 4): \n'
+            '2024-03-19 16:05:38.202000: localhost (dbid 2): some error\n'
+            '2024-03-19 16:05:38.202000: host2 (dbid 4): \n'
+            '2024-03-19 16:05:38.202000: host3 (dbid 5): rsync failed\n'
         ))
 
     def test_successful_command_execution_should_delete_the_recovery_progress_file(self):
         cmd1 = self.create_command('host1', 1, './pg_basebackup.23432', "1164848/1371715 kB (84%)\n")
         cmd2 = self.create_command('host2', 2, './pg_rewind.23432', "1164858/1371715 kB (90%)\n")
+        cmd3 = self.create_command('host3', 2, './rsync.23432', "117480 64%  8.34MB/s\n")
 
 
         outfile = io.StringIO()
         self.pool.join.return_value = True
-        self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2], outfile=outfile)
+        self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2, cmd3], outfile=outfile)
         self.mock_os_remove.assert_called_once_with(self.combined_progress_file)
 
     def test_error_during_command_execution_should_delete_the_recovery_progress_file(self):
         cmd1 = self.create_command('host1', 1, './pg_basebackup.23432', stderr="some error\n")
         cmd2 = self.create_command('host2', 2, './pg_rewind.23432', stderr='')
+        cmd3 = self.create_command('host3', 2, './rsync.23432', stderr='')
 
         cmd1.run.side_effect = Exception("Some exception1")
         cmd2.run.side_effect = Exception("Some exception2")
+        cmd3.run.side_effect = Exception("Some exception3")
 
 
         outfile = io.StringIO()
         self.pool.join.return_value = True
         with self.assertRaisesRegex(Exception, "Some exception1"):
-            self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2], outfile=outfile)
+            self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2, cmd3], outfile=outfile)
         self.mock_os_remove.assert_called_once_with(self.combined_progress_file)
 
     def test_join_and_show_segment_progress_writes_progress_file(self):
 
         cmd1 = self.create_command('host1', 1, './pg_basebackup.23432', "1164848/1371715 kB (84%)\n")
         cmd2 = self.create_command('host2', 2, './pg_rewind.23432', "1164858/1371715 kB (90%)\n")
+        cmd3 = self.create_command('host3', 3, './rsync.23432', "117480 64%  8.34MB/s\n")
 
         outfile = io.StringIO()
         self.pool.join.return_value = True
 
-        self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2], outfile=outfile)
+        self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2, cmd3], outfile=outfile)
 
         self.mock_os_remove.assert_called_once_with(self.combined_progress_file)
 
@@ -1071,17 +1122,19 @@ class SegmentProgressTestCase(GpTestCase):
             results = f.readlines()
         self.assertEqual(results, [
             'full:1:1164848/1371715 kB (84%)\n',
-            'incremental:2:1164858/1371715 kB (90%)\n'
+            'incremental:2:1164858/1371715 kB (90%)\n',
+            'differential:3:117480 64%  8.34MB/s\n',
         ])
 
     def test_join_and_show_segment_progress_overwrites(self):
         cmd1 = self.create_command('host1', 1, './pg_basebackup.23432', "1164848/1371715 kB (84%)\n")
         cmd2 = self.create_command('host2', 2, './pg_rewind.23432', "1164858/1371715 kB (90%)\n")
+        cmd3 = self.create_command('host3', 3, './rsync.23432', "1164858/1371715 kB (90%)\n")
 
         outfile = io.StringIO()
         self.pool.join.return_value = True
 
-        self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2], outfile=outfile)
+        self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2, cmd3], outfile=outfile)
 
         self.mock_os_remove.assert_called_once_with(self.combined_progress_file)
 
@@ -1089,34 +1142,64 @@ class SegmentProgressTestCase(GpTestCase):
             results = f.readlines()
         self.assertEqual(results, [
             'full:1:1164848/1371715 kB (84%)\n',
-            'incremental:2:1164858/1371715 kB (90%)\n'
+            'incremental:2:1164858/1371715 kB (90%)\n',
+            'differential:3:1164858/1371715 kB (90%)\n',
         ])
 
         cmd1 = self.create_command('host11', 11, './pg_rewind.23432', "9964858/9971715 kB (1%)\n")
         cmd2 = self.create_command('host22', 22, './pg_basebackup.23432', "9964848/9971715 kB (45%)\n")
-        self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2], outfile=outfile)
+        cmd3 = self.create_command('host33', 33, './rsync.23432', "117480 64%  8.34MB/s\n")
+        self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2, cmd3], outfile=outfile)
 
         with open(self.combined_progress_file, 'r') as f:
             results = f.readlines()
             self.assertEqual(results, [
                 'incremental:11:9964858/9971715 kB (1%)\n',
-                'full:22:9964848/9971715 kB (45%)\n'
+                'full:22:9964848/9971715 kB (45%)\n',
+                'differential:33:117480 64%  8.34MB/s\n',
             ])
 
     def test_verify_recovery_progress_file_when_command_results_are_not_in_expected_format(self):
             cmd1 = self.create_command('host1', 1, './pg_basebackup.23432', "string 1\n")
             cmd2 = self.create_command('host2', 2, './pg_basebackup.23432', "string 2\n")
+            cmd3 = self.create_command('host3', 3, './rsync.23432', "string 3\n")
 
 
             outfile = io.StringIO()
             self.pool.join.return_value = True
-            self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2], outfile=outfile)
+            self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2, cmd3], outfile=outfile)
 
             self.mock_os_remove.assert_called_once_with(self.combined_progress_file)
 
             with open(self.combined_progress_file, 'r') as f:
                 results = f.readlines()
             self.assertEqual(results, [])
+
+    def test_skipping_pg_rewind_is_not_displayed_if_no_result_for_differential_recovery(self):
+        cmd1 = self.create_command('host1', 1, './pg_basebackup.23432', "1164848/1371715 kB (84%)\n")
+        cmd2 = self.create_command('host2', 2, './pg_rewind.23432', "")
+        cmd3 = self.create_command('host3', 3, './rsync.23432', "")
+
+        outfile = io.StringIO()
+        self.pool.join.return_value = True
+
+        self.buildMirrorSegs._join_and_show_segment_progress([cmd1, cmd2, cmd3], outfile=outfile)
+
+        self.mock_os_remove.assert_called_once_with(self.combined_progress_file)
+
+        with open(self.combined_progress_file, 'r') as f:
+            results = f.readlines()
+        self.assertEqual(results, [
+            'full:1:1164848/1371715 kB (84%)\n'
+        ])
+        stdout_results = outfile.getvalue()
+
+        self.assertEqual(stdout_results, (
+            '2024-03-19 16:05:38.202000: host1 (dbid 1): 1164848/1371715 kB (84%)\n'
+            '2024-03-19 16:05:38.202000: host2 (dbid 2): skipping pg_rewind on mirror as standby.signal is present\n'
+            '2024-03-19 16:05:38.202000: host3 (dbid 3): \n'
+        ))
+
 
 if __name__ == '__main__':
     run_tests()

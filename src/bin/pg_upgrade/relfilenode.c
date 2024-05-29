@@ -40,13 +40,13 @@ transfer_all_new_tablespaces(DbInfoArr *old_db_arr, DbInfoArr *new_db_arr,
 	switch (user_opts.transfer_mode)
 	{
 		case TRANSFER_MODE_CLONE:
-			pg_log(PG_REPORT, "Cloning user relation files\n");
+			prep_status_progress("Cloning user relation files");
 			break;
 		case TRANSFER_MODE_COPY:
-			pg_log(PG_REPORT, "Copying user relation files\n");
+			prep_status_progress("Copying user relation files");
 			break;
 		case TRANSFER_MODE_LINK:
-			pg_log(PG_REPORT, "Linking user relation files\n");
+			prep_status_progress("Linking user relation files");
 			break;
 	}
 
@@ -56,8 +56,12 @@ transfer_all_new_tablespaces(DbInfoArr *old_db_arr, DbInfoArr *new_db_arr,
 	 * NULL tablespace path, which matches all tablespaces.  In parallel mode,
 	 * we pass the default tablespace and all user-created tablespaces and let
 	 * those operations happen in parallel.
+	 *
+	 * GPDB: Disable pg_upgrade's broken parallel tablespace transfer to make the rest
+	 * of the parallelism from the --jobs flag usable now to get a performance
+	 * boost.
 	 */
-	if (user_opts.jobs <= 1)
+	if (true) /* (user_opts.jobs <= 1) */
 		parallel_transfer_all_new_dbs(old_db_arr, new_db_arr, old_pgdata,
 									  new_pgdata, NULL);
 	else
@@ -149,16 +153,7 @@ static void
 transfer_single_new_db(FileNameMap *maps, int size, char *old_tablespace)
 {
 	int			mapnum;
-	bool		vm_crashsafe_match = true;
 	bool		vm_must_add_frozenbit = false;
-
-	/*
-	 * Do the old and new cluster disagree on the crash-safetiness of the vm
-	 * files?  If so, do not copy them.
-	 */
-	if (old_cluster.controldata.cat_ver < VISIBILITY_MAP_CRASHSAFE_CAT_VER &&
-		new_cluster.controldata.cat_ver >= VISIBILITY_MAP_CRASHSAFE_CAT_VER)
-		vm_crashsafe_match = false;
 
 	/*
 	 * Do we need to rewrite visibilitymap?
@@ -187,8 +182,7 @@ transfer_single_new_db(FileNameMap *maps, int size, char *old_tablespace)
 				 * Copy/link any fsm and vm files, if they exist
 				 */
 				transfer_relfile(&maps[mapnum], "_fsm", vm_must_add_frozenbit);
-				if (vm_crashsafe_match)
-					transfer_relfile(&maps[mapnum], "_vm", vm_must_add_frozenbit);
+				transfer_relfile(&maps[mapnum], "_vm", vm_must_add_frozenbit);
 			}
 		}
 	}
@@ -227,7 +221,7 @@ transfer_relfile(FileNameMap *map, const char *type_suffix, bool vm_must_add_fro
  * file (the one without an extent suffix) for a relation is also fatal, since
  * we expect that to exist for both heap and AO tables in any case.
  *
- * TODO: verify that AO tables must always have a segment zero.
+ * GPDB_UPGRADE_FIXME: verify that AO tables must always have a segment zero.
  */
 static bool
 transfer_relfile_segment(int segno, FileNameMap *map,

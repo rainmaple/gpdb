@@ -31,19 +31,20 @@ using namespace gpmd;
 //---------------------------------------------------------------------------
 CMDRelationGPDB::CMDRelationGPDB(
 	CMemoryPool *mp, IMDId *mdid, CMDName *mdname, BOOL fTemporary,
-	Erelstoragetype rel_storage_type, Ereldistrpolicy rel_distr_policy,
-	CMDColumnArray *mdcol_array, ULongPtrArray *distr_col_array,
-	IMdIdArray *distr_opfamilies, ULongPtrArray *partition_cols_array,
-	CharPtrArray *str_part_types_array, IMdIdArray *partition_oids,
-	BOOL convert_hash_to_random, ULongPtr2dArray *keyset_array,
-	CMDIndexInfoArray *md_index_info_array,
+	Erelstoragetype rel_storage_type, Erelaoversion rel_ao_version,
+	Ereldistrpolicy rel_distr_policy, CMDColumnArray *mdcol_array,
+	ULongPtrArray *distr_col_array, IMdIdArray *distr_opfamilies,
+	ULongPtrArray *partition_cols_array, CharPtrArray *str_part_types_array,
+	IMdIdArray *partition_oids, BOOL convert_hash_to_random,
+	ULongPtr2dArray *keyset_array, CMDIndexInfoArray *md_index_info_array,
 	IMdIdArray *mdid_check_constraint_array, CDXLNode *mdpart_constraint,
-	IMDId *foreign_server)
+	IMDId *foreign_server, CDouble rows)
 	: m_mp(mp),
 	  m_mdid(mdid),
 	  m_mdname(mdname),
 	  m_is_temp_table(fTemporary),
 	  m_rel_storage_type(rel_storage_type),
+	  m_rel_ao_version(rel_ao_version),
 	  m_rel_distr_policy(rel_distr_policy),
 	  m_md_col_array(mdcol_array),
 	  m_dropped_cols(0),
@@ -61,7 +62,8 @@ CMDRelationGPDB::CMDRelationGPDB(
 	  m_foreign_server(foreign_server),
 	  m_colpos_nondrop_colpos_map(nullptr),
 	  m_attrno_nondrop_col_pos_map(nullptr),
-	  m_nondrop_col_pos_array(nullptr)
+	  m_nondrop_col_pos_array(nullptr),
+	  m_rows(rows)
 {
 	GPOS_ASSERT(mdid->IsValid());
 	GPOS_ASSERT(nullptr != mdcol_array);
@@ -211,6 +213,12 @@ IMDRelation::Erelstoragetype
 CMDRelationGPDB::RetrieveRelStorageType() const
 {
 	return m_rel_storage_type;
+}
+
+IMDRelation::Erelaoversion
+CMDRelationGPDB::GetRelAOVersion() const
+{
+	return m_rel_ao_version;
 }
 
 //---------------------------------------------------------------------------
@@ -588,6 +596,11 @@ CMDRelationGPDB::ForeignServer() const
 	return m_foreign_server;
 }
 
+CDouble
+CMDRelationGPDB::Rows() const
+{
+	return m_rows;
+}
 
 //---------------------------------------------------------------------------
 //	@function:
@@ -612,9 +625,23 @@ CMDRelationGPDB::Serialize(CXMLSerializer *xml_serializer) const
 								 m_mdname->GetMDName());
 	xml_serializer->AddAttribute(
 		CDXLTokens::GetDXLTokenStr(EdxltokenRelTemporary), m_is_temp_table);
+
+	if (m_rows > 0)
+	{
+		xml_serializer->AddAttribute(CDXLTokens::GetDXLTokenStr(EdxltokenRows),
+									 m_rows);
+	}
+
 	xml_serializer->AddAttribute(
 		CDXLTokens::GetDXLTokenStr(EdxltokenRelStorageType),
 		IMDRelation::GetStorageTypeStr(m_rel_storage_type));
+	if (IsAORowOrColTable() ||
+		IMDRelation::ErelstorageMixedPartitioned == RetrieveRelStorageType())
+	{
+		xml_serializer->AddAttribute(
+			CDXLTokens::GetDXLTokenStr(EdxltokenRelAppendOnlyVersion),
+			m_rel_ao_version);
+	}
 	xml_serializer->AddAttribute(
 		CDXLTokens::GetDXLTokenStr(EdxltokenRelDistrPolicy),
 		GetDistrPolicyStr(m_rel_distr_policy));
@@ -790,6 +817,8 @@ CMDRelationGPDB::DebugPrint(IOstream &os) const
 	os << "Storage type: "
 	   << IMDRelation::GetStorageTypeStr(m_rel_storage_type)->GetBuffer()
 	   << std::endl;
+
+	os << "AO version: " << m_rel_ao_version << std::endl;
 
 	os << "Distribution policy: "
 	   << GetDistrPolicyStr(m_rel_distr_policy)->GetBuffer() << std::endl;

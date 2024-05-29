@@ -10,6 +10,8 @@
 -- start_matchsubs
 -- m/DETAIL:  Failing row contains \(.*\)/
 -- s/DETAIL:  Failing row contains \(.*\)/DETAIL:  Failing row contains (#####)/
+-- m/\(cost=.*\)/
+-- s/\(cost=.*\)//
 -- end_matchsubs
 begin;
 CREATE TABLE dml_union_r (
@@ -734,6 +736,23 @@ select 1
 union all
 select * from t_github_issue_9874 where a = 1;
 
+--
+-- Test mixing a SegmentGeneral with distributed table
+-- when gp_enable_direct_dispatch is off.
+--
+begin;
+create table rt1(a int, b int) distributed replicated;
+create table t1(a int, b int);
+insert into t1 select i, i+1 from generate_series(6, 9) i;
+insert into rt1 select i, i+1 from generate_series(1, 5) i;
+set local gp_enable_direct_dispatch = on;
+explain(costs off) select * from rt1 union all select * from t1;
+select * from rt1 union all select * from t1;
+set local gp_enable_direct_dispatch = off;
+select * from rt1 union all select * from t1;
+reset gp_enable_direct_dispatch;
+abort;
+
 -- Test mixing a SegmentGeneral with General locus scan.
 explain (costs off)
 select a from t_test_append_rep
@@ -743,6 +762,16 @@ select * from generate_series(100, 105);
 select a from t_test_append_rep
 union all
 select * from generate_series(100, 105);
+
+-- test INTERSECT/EXCEPT with General and partitioned locus, but none of the columns are hashable
+CREATE TABLE p1(a int) distributed by (a);
+INSERT INTO p1 select generate_series(1,10);
+explain (costs off)
+select from generate_series(1,5) intersect select from p1;
+select from generate_series(1,5) intersect select from p1;
+explain (costs off)
+select from generate_series(1,5) except select from p1;
+select from generate_series(1,5) except select from p1;
 
 --
 -- Test for creation of MergeAppend paths.

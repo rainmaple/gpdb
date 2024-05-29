@@ -6,6 +6,7 @@
       <dxl:StatisticsConfig DampingFactorFilter="0.750000" DampingFactorJoin="0.000000" DampingFactorGroupBy="0.750000" MaxStatsBuckets="100"/>
       <dxl:CTEConfig CTEInliningCutoff="0"/> 
       <dxl:WindowOids RowNumber="7000" Rank="7001"/>
+      <dxl:PlanHint/>
       <dxl:TraceFlags Value="103027,102016,103001"/>
     </dxl:OptimizerConfig>
     <dxl:Metadata SystemIds="0.GPDB">
@@ -39,7 +40,7 @@
         <dxl:SumAgg Mdid="0.2107.1.0"/>
         <dxl:CountAgg Mdid="0.2147.1.0"/>
       </dxl:Type>
-      <dxl:GPDBFunc Mdid="0.516381.1.0" Name="myfunc" ReturnsSet="true" Stability="Volatile" DataAccess="ContainsSQL" IsStrict="false">
+      <dxl:GPDBFunc Mdid="0.516381.1.0" Name="myfunc" ReturnsSet="true" Stability="Volatile" IsStrict="false">
         <dxl:ResultType Mdid="0.23.1.0"/>
         <dxl:OutputColumns TypeMdids="0.23.1.0"/>
       </dxl:GPDBFunc>

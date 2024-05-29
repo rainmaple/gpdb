@@ -22,6 +22,7 @@
 #include "postgres.h"
 
 #include <signal.h>
+#include <unistd.h>
 
 #include "access/xact.h"
 #include "catalog/pg_type.h"
@@ -269,7 +270,9 @@ checkBgProcessSkipFault(const char* faultName)
 	{
 		/* dtx recovery process */
 		 if (0 != strcmp("before_orphaned_check", faultName) &&
-				0 != strcmp("after_orphaned_check", faultName))
+				0 != strcmp("after_orphaned_check", faultName) &&
+				0 != strcmp("post_in_doubt_tx_in_progress", faultName) &&
+				0 != strcmp("post_progress_recovery_comitted", faultName))
 		{
 			elog(LOG, "skipped fault '%s' in dtx recovery process", faultName);
 			return true;
@@ -466,6 +469,7 @@ FaultInjector_InjectFaultIfSet_out_of_line(
 			while ((entry = FaultInjector_LookupHashEntry(entryLocal->faultName)) != NULL &&
 				   entry->faultInjectorType != FaultInjectorTypeResume)
 			{
+				CHECK_FOR_INTERRUPTS();
 				pg_usleep(1000000L);  // 1 sec
 			}
 
@@ -539,6 +543,17 @@ FaultInjector_InjectFaultIfSet_out_of_line(
 							entryLocal->faultName,
 							FaultInjectorTypeEnumToString[entryLocal->faultInjectorType])));
 			QueryFinishPending = true;
+			break;
+		}
+
+		case FaultInjectorTypeExitNoCallbacks:
+		{
+			ereport(LOG,
+					(errcode(ERRCODE_FAULT_INJECT),
+						errmsg("fault triggered, fault name:'%s' fault type:'%s' ",
+							   entryLocal->faultName,
+							   FaultInjectorTypeEnumToString[entryLocal->faultInjectorType])));
+			_exit(entryLocal->extraArg);
 			break;
 		}
 

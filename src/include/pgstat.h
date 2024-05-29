@@ -874,7 +874,8 @@ typedef enum BackendType
 	B_STARTUP,
 	B_WAL_RECEIVER,
 	B_WAL_SENDER,
-	B_WAL_WRITER
+	B_WAL_WRITER,
+	B_ARCHIVER
 } BackendType;
 
 
@@ -1129,7 +1130,8 @@ typedef enum ProgressCommandType
 	PROGRESS_COMMAND_CLUSTER,
 	PROGRESS_COMMAND_CREATE_INDEX,
 	PROGRESS_COMMAND_BASEBACKUP,
-	PROGRESS_COMMAND_COPY
+	PROGRESS_COMMAND_COPY,
+	PROGRESS_COMMAND_DTX_RECOVERY,
 } ProgressCommandType;
 
 #define PGSTAT_NUM_PROGRESS_PARAM	20
@@ -1450,6 +1452,8 @@ extern void pgstat_report_queuestat(void); /* GPDB */
 
 extern void pgstat_drop_database(Oid databaseid);
 
+extern void pgstat_request_update(TimestampTz cur_ts, TimestampTz min_ts);
+extern void pgstat_use_stale_snapshot(void);
 extern void pgstat_clear_snapshot(void);
 extern void pgstat_reset_counters(void);
 extern void pgstat_reset_shared_counters(const char *);

@@ -58,6 +58,12 @@ enum Edxltoken
 	EdxltokenCostModelType,
 	EdxltokenSegmentsForCosting,
 	EdxltokenHint,
+	EdxltokenPlanHint,
+	EdxltokenScanHint,
+	EdxltokenRowHint,
+	EdxltokenJoinHint,
+	EdxltokenJoinTypeHint,
+	EdxltokenLeading,
 	EdxltokenJoinArityForAssociativityCommutativity,
 	EdxltokenArrayExpansionThreshold,
 	EdxltokenJoinOrderDPThreshold,
@@ -82,6 +88,10 @@ enum Edxltoken
 
 	EdxltokenThread,
 
+	EdxltokenNoPhysicalHashJoin,
+	EdxltokenNoPhysicalNLJoin,
+	EdxltokenNoPhysicalMergeJoin,
+
 	EdxltokenPhysical,
 
 	EdxltokenPhysicalTableScan,
@@ -102,7 +112,6 @@ enum Edxltoken
 	EdxltokenPhysicalSort,
 	EdxltokenPhysicalLimit,
 	EdxltokenPhysicalResult,
-	EdxltokenPhysicalSubqueryScan,
 	EdxltokenPhysicalAggregate,
 	EdxltokenPhysicalAppend,
 	EdxltokenPhysicalMaterialize,
@@ -122,8 +131,6 @@ enum Edxltoken
 
 	EdxltokenDuplicateSensitive,
 
-	EdxltokenPartIndexId,
-	EdxltokenPartIndexIdPrintable,
 	EdxltokenSegmentIdCol,
 
 	EdxltokenScalar,
@@ -168,6 +175,7 @@ enum Edxltoken
 	EdxltokenScalarLimitOffset,
 	EdxltokenScalarOneTimeFilter,
 	EdxltokenScalarOpExpr,
+	EdxltokenScalarParam,
 	EdxltokenScalarProjElem,
 	EdxltokenScalarCast,
 	EdxltokenScalarCoerceToDomain,
@@ -268,6 +276,13 @@ enum Edxltoken
 	EdxltokenWindowrefStageRowKey,
 	EdxltokenWindowrefWinSpecPos,
 
+	// FIELDSELECT
+	EdxltokenScalarFieldSelect,
+	EdxltokenScalarFieldSelectFieldType,
+	EdxltokenScalarFieldSelectFieldCollation,
+	EdxltokenScalarFieldSelectFieldNumber,
+	EdxltokenScalarFieldSelectTypeModifier,
+
 	EdxltokenValue,
 	EdxltokenTypeId,
 	EdxltokenTypeIds,
@@ -351,6 +366,8 @@ enum Edxltoken
 	EdxltokenColFreqRemain,
 	EdxltokenColStatsMissing,
 
+	EdxltokenParamId,
+
 	EdxltokenCtidColName,
 	EdxltokenOidColName,
 	EdxltokenXminColName,
@@ -359,6 +376,9 @@ enum Edxltoken
 	EdxltokenCmaxColName,
 	EdxltokenTableOidColName,
 	EdxltokenGpSegmentIdColName,
+
+	// For Logical Select
+	EdxltokenSecurityQuals,
 
 	EdxltokenActionColId,
 	EdxltokenCtidColId,
@@ -449,6 +469,7 @@ enum Edxltoken
 	EdxltokenVersion,
 	EdxltokenMdid,
 	EdxltokenLockMode,
+	EdxltokenAclMode,
 	EdxltokenMDTypeRequest,
 	EdxltokenTypeInfo,
 	EdxltokenFuncInfo,
@@ -490,6 +511,7 @@ enum Edxltoken
 	EdxltokenRelDistrHash,
 	EdxltokenRelDistrRandom,
 	EdxltokenRelDistrReplicated,
+	EdxltokenRelDistrUniversal,
 	EdxltokenConvertHashToRandom,
 
 	EdxltokenRelDistrOpfamilies,
@@ -503,14 +525,15 @@ enum Edxltoken
 	EdxltokenMetadataColumns,
 	EdxltokenMetadataColumn,
 	EdxltokenColumnNullable,
-	EdxltokenColumnDefaultValue,
 
 	EdxltokenKeys,
 	EdxltokenDistrColumns,
 
 	EdxltokenIndexKeyCols,
 	EdxltokenIndexIncludedCols,
+	EdxltokenIndexReturnableCols,
 	EdxltokenIndexClustered,
+	EdxltokenIndexAmCanOrder,
 	EdxltokenIndexPartial,
 	EdxltokenIndexType,
 	EdxltokenIndexTypeBtree,
@@ -519,6 +542,12 @@ enum Edxltoken
 	EdxltokenIndexTypeGist,
 	EdxltokenIndexTypeGin,
 	EdxltokenIndexItemType,
+	EdxltokenIndexKeysSortDirection,
+	EdxltokenIndexKeysNullsDirection,
+	EdxltokenIndexKeySortASC,
+	EdxltokenIndexKeySortDESC,
+	EdxltokenIndexKeyNullsFirst,
+	EdxltokenIndexKeyNullsLast,
 
 	EdxltokenOpfamily,
 	EdxltokenOpfamilies,
@@ -602,11 +631,7 @@ enum Edxltoken
 	EdxltokenGPDBFuncStable,
 	EdxltokenGPDBFuncImmutable,
 	EdxltokenGPDBFuncVolatile,
-	EdxltokenGPDBFuncDataAccess,
-	EdxltokenGPDBFuncNoSQL,
-	EdxltokenGPDBFuncContainsSQL,
-	EdxltokenGPDBFuncReadsSQLData,
-	EdxltokenGPDBFuncModifiesSQLData,
+
 	EdxltokenGPDBFuncResultTypeId,
 	EdxltokenGPDBFuncReturnsSet,
 	EdxltokenGPDBFuncStrict,
@@ -738,6 +763,13 @@ enum Edxltoken
 	EdxltokenIndexTypeBrin,
 
 	EdxltokenForeignServerOid,
+	EdxltokenPhysicalDynamicIndexOnlyScan,
+	EdxltokenRelAppendOnlyVersion,
+
+	EdxltokenAbsolute,
+	EdxltokenAdd,
+	EdxltokenSubtract,
+	EdxltokenMultiply,
 
 	EdxltokenSentinel
 };

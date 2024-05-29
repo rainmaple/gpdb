@@ -70,7 +70,7 @@ $ gpfdist -d /var/load_files -p 8081 -l /home/`gpadmin`/log &
 
 ```
 
-For multiple gpfdist instances on the same ETL host \(see [Figure 1](#du165872)\), use a different base directory and port for each instance. For example:
+For multiple gpfdist instances on the same ETL host, use a different base directory and port for each instance. For example:
 
 ```
 $ gpfdist -d /var/load_files1 -p 8081 -l /home/`gpadmin`/log1 &
@@ -115,7 +115,7 @@ If the corresponding IPv4 port is available, gpfdist uses that port and the warn
 
 For information about IPv6 and IPv4 networking, see your operating system documentation.
 
-When reading or writing data with the `gpfdist` or `gfdists` protocol, the `gpfdist` utility rejects HTTP requests that do not include `X-GP-PROTO` in the request header. If `X-GP-PROTO` is not detected in the header request `gpfist` returns a 400 error in the status line of the HTTP response header: `400 invalid request (no gp-proto)`.
+When reading or writing data with the `gpfdist` or `gfdists` protocol, the `gpfdist` utility rejects HTTP requests that do not include `X-GP-PROTO` in the request header. If `X-GP-PROTO` is not detected in the header request `gpfdist` returns a 400 error in the status line of the HTTP response header: `400 invalid request (no gp-proto)`.
 
 Greenplum Database includes `X-GP-PROTO` in the HTTP request header to indicate that the request is from Greenplum Database.
 

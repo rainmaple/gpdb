@@ -25,9 +25,10 @@ PostgreSQL documentation
 ALTER RESOURCE GROUP name SET group_attribute value
 where group_attribute is one of:
    CONCURRENCY integer
-   CPU_HARD_QUOTA_LIMIT integer
-   CPU_SOFT_PRIORITY integer
+   CPU_MAX_PERCENT integer
+   CPU_WEIGHT integer
    CPUSET tuple
+   MEMORY_QUOTA integer
 
 </synopsis>
  </refsynopsisdiv>

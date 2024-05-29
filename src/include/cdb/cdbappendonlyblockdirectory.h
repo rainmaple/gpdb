@@ -83,6 +83,8 @@ typedef struct MinipagePerColumnGroup
 	Minipage *minipage;
 	uint32 numMinipageEntries;
 	ItemPointerData tupleTid;
+	/* cached entry number from last call to find_minipage_entry() */
+	int cached_entry_no;
 } MinipagePerColumnGroup;
 
 /*
@@ -94,6 +96,8 @@ typedef struct MinipagePerColumnGroup
 
 #define IsMinipageFull(minipagePerColumnGroup) \
 	((minipagePerColumnGroup)->numMinipageEntries == (uint32) gp_blockdirectory_minipage_size)
+
+#define InvalidEntryNum (-1)
 
 /*
  * Define a structure for the append-only relation block directory.
@@ -107,7 +111,6 @@ typedef struct AppendOnlyBlockDirectory
 	CatalogIndexState indinfo;
 	int numColumnGroups;
 	bool isAOCol;
-	bool *proj; /* projected columns, used only if isAOCol = TRUE */
 
 	MemoryContext memoryContext;
 
@@ -134,6 +137,10 @@ typedef struct AppendOnlyBlockDirectory
 	int numScanKeys;
 	ScanKey scanKeys;
 	StrategyNumber *strategyNumbers;
+
+	/* Column numbers (zero based) of columns we need to fetch */
+	AttrNumber		   *proj_atts;
+	AttrNumber			num_proj_atts;
 
 }	AppendOnlyBlockDirectory;
 
@@ -174,10 +181,17 @@ typedef struct AOFetchSegmentFile
 	int64 logicalEof;
 } AOFetchSegmentFile;
 
-typedef struct AppendOnlyBlockDirectorySeqScan {
-	AppendOnlyBlockDirectory blkdir;
-	SysScanDesc sysScan;
-} AppendOnlyBlockDirectorySeqScan;
+/*
+ * Tracks block directory scan state for block-directory based ANALYZE.
+ */
+typedef struct AOBlkDirScanData
+{
+	AppendOnlyBlockDirectory	*blkdir;
+	SysScanDesc					sysscan;
+	int							segno;
+	int							colgroupno;
+	int							mpentryno;
+} AOBlkDirScanData, *AOBlkDirScan;
 
 extern void AppendOnlyBlockDirectoryEntry_GetBeginRange(
 	AppendOnlyBlockDirectoryEntry	*directoryEntry,
@@ -194,10 +208,26 @@ extern bool AppendOnlyBlockDirectory_GetEntry(
 	AppendOnlyBlockDirectory		*blockDirectory,
 	AOTupleId 						*aoTupleId,
 	int                             columnGroupNo,
-	AppendOnlyBlockDirectoryEntry	*directoryEntry);
+	AppendOnlyBlockDirectoryEntry	*directoryEntry,
+	int64 				*attnum_to_rownum);
+extern bool AppendOnlyBlockDirectory_GetEntryForPartialScan(
+	AppendOnlyBlockDirectory		*blockDirectory,
+	BlockNumber 					blkno,
+	int                             columnGroupNo,
+	AppendOnlyBlockDirectoryEntry	*dirEntry,
+	int 							*fsInfoIdx);
+extern int64 AOBlkDirScan_GetRowNum(
+	AOBlkDirScan					blkdirscan,
+	int								targsegno,
+	int								colgroupno,
+	int64							targrow,
+	int64							*startrow);
 extern bool AppendOnlyBlockDirectory_CoversTuple(
 	AppendOnlyBlockDirectory		*blockDirectory,
 	AOTupleId 						*aoTupleId);
+extern bool blkdir_entry_exists(AppendOnlyBlockDirectory *blockDirectory,
+	AOTupleId 				*aoTupleId,
+	int 					columnGroupNo);
 extern void AppendOnlyBlockDirectory_Init_forInsert(
 	AppendOnlyBlockDirectory *blockDirectory,
 	Snapshot appendOnlyMetaDataSnapshot,
@@ -224,7 +254,7 @@ extern void AppendOnlyBlockDirectory_Init_forIndexOnlyScan(AppendOnlyBlockDirect
 														   Relation aoRel,
 														   int numColumnGroups,
 														   Snapshot snapshot);
-extern void AppendOnlyBlockDirectory_Init_addCol(
+extern void AppendOnlyBlockDirectory_Init_writeCols(
 	AppendOnlyBlockDirectory *blockDirectory,
 	Snapshot appendOnlyMetaDataSnapshot,
 	FileSegInfo *segmentFileInfo,
@@ -232,24 +262,29 @@ extern void AppendOnlyBlockDirectory_Init_addCol(
 	int segno,
 	int numColumnGroups,
 	bool isAOCol);
-extern bool AppendOnlyBlockDirectory_InsertEntry(
-	AppendOnlyBlockDirectory *blockDirectory,
-	int columnGroupNo,
-	int64 firstRowNum,
-	int64 fileOffset,
-	int64 rowCount,
-	bool addColAction);
+extern bool
+AppendOnlyBlockDirectory_InsertEntry(AppendOnlyBlockDirectory *blockDirectory,
+									 int columnGroupNo,
+									 int64 firstRowNum,
+									 int64 fileOffset,
+									 int64 rowCount);
+extern void
+AppendOnlyBlockDirectory_DeleteSegmentFile(AppendOnlyBlockDirectory *blockDirectory,
+										   int columnGroupNo,
+										   int segno,
+										   Snapshot snapshot);
 extern void AppendOnlyBlockDirectory_End_forInsert(
 	AppendOnlyBlockDirectory *blockDirectory);
 extern void AppendOnlyBlockDirectory_End_forSearch(
 	AppendOnlyBlockDirectory *blockDirectory);
-extern void AppendOnlyBlockDirectory_End_addCol(
-	AppendOnlyBlockDirectory *blockDirectory);
-extern void AppendOnlyBlockDirectory_DeleteSegmentFile(
-	Relation aoRel,
-		Snapshot snapshot,
-		int segno,
-		int columnGroupNo);
+extern void AppendOnlyBlockDirectory_End_writeCols(
+	AppendOnlyBlockDirectory *blockDirectory, List *newvals);
+extern void
+AppendOnlyBlockDirectory_DeleteSegmentFiles(Oid blkdirrelid,
+											Snapshot snapshot,
+											int segno);
+extern void AppendOnlyBlockDirectory_End_forSearch_InSequence(
+	AOBlkDirScan seqscan);
 extern void AppendOnlyBlockDirectory_End_forUniqueChecks(
 	AppendOnlyBlockDirectory *blockDirectory);
 extern void AppendOnlyBlockDirectory_End_forIndexOnlyScan(
@@ -259,7 +294,6 @@ extern void AppendOnlyBlockDirectory_InsertPlaceholder(AppendOnlyBlockDirectory 
 												  int64 firstRowNum,
 												  int64 fileOffset,
 												  int columnGroupNo);
-
 /*
  * AppendOnlyBlockDirectory_UniqueCheck
  *
@@ -331,6 +365,39 @@ copy_out_minipage(MinipagePerColumnGroup *minipageInfo,
 	Assert(minipageInfo->minipage->nEntry <= NUM_MINIPAGE_ENTRIES);
 
 	minipageInfo->numMinipageEntries = minipageInfo->minipage->nEntry;
+	minipageInfo->cached_entry_no = InvalidEntryNum;
+}
+
+static inline void
+AOBlkDirScan_Init(AOBlkDirScan blkdirscan,
+				  AppendOnlyBlockDirectory *blkdir)
+{
+	blkdirscan->blkdir = blkdir;
+	blkdirscan->sysscan = NULL;
+	blkdirscan->segno = -1;
+	blkdirscan->colgroupno = 0;
+	blkdirscan->mpentryno = InvalidEntryNum;
+}
+
+/* should be called before fetch_finish() */
+static inline void
+AOBlkDirScan_Finish(AOBlkDirScan blkdirscan)
+{
+	/*
+	 * Make sure blkdir hasn't been destroyed by fetch_finish(),
+	 * or systable_endscan_ordered() will be crashed for sysscan
+	 * is holding blkdir relation which is freed.
+	 */
+	Assert(blkdirscan->blkdir != NULL);
+
+	if (blkdirscan->sysscan != NULL)
+	{
+		systable_endscan_ordered(blkdirscan->sysscan);
+		blkdirscan->sysscan = NULL;
+	}
+	blkdirscan->segno = -1;
+	blkdirscan->colgroupno = 0;
+	blkdirscan->blkdir = NULL;
 }
 
 #endif

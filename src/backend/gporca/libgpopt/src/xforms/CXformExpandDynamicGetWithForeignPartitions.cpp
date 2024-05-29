@@ -85,6 +85,7 @@ CXformExpandDynamicGetWithForeignPartitions::Transform(CXformContext *pxfctxt,
 
 	IMdIdArray *foreign_server_mdids = popGet->ForeignServerMdIds();
 	IMdIdArray *all_part_mdids = popGet->GetPartitionMdids();
+	BOOL hasSecurityQuals = popGet->HasSecurityQuals();
 
 	IMdIdArray *non_foreign_parts = GPOS_NEW(mp) IMdIdArray(mp);
 	// create map from server-> (array of part mdids)
@@ -112,14 +113,11 @@ CXformExpandDynamicGetWithForeignPartitions::Transform(CXformContext *pxfctxt,
 			// (some foreign tables can only be executed on segments, others only the coordinator)
 			// place these in a map from server->array of foreign partitions
 			const IMDRelation *pmdrel = md_accessor->RetrieveRel(partMdid);
-			BOOL is_coordinator_only =
-				(gpmd::CMDRelationGPDB::EreldistrCoordinatorOnly ==
-				 pmdrel->GetRelDistribution());
 
 			OID foreign_server_oid =
 				CMDIdGPDB::CastMdid(foreign_server_mdid)->Oid();
-			SForeignServer foreign_server_lookup = {foreign_server_oid,
-													is_coordinator_only};
+			SForeignServer foreign_server_lookup = {
+				foreign_server_oid, pmdrel->GetRelDistribution()};
 			const IMdIdArray *foreign_server =
 				foreign_server_to_part_oid_array_map->Find(
 					&foreign_server_lookup);
@@ -130,8 +128,8 @@ CXformExpandDynamicGetWithForeignPartitions::Transform(CXformContext *pxfctxt,
 				part_oid_array->Append(partMdid);
 				BOOL fres GPOS_ASSERTS_ONLY =
 					foreign_server_to_part_oid_array_map->Insert(
-						GPOS_NEW(mp) SForeignServer{foreign_server_oid,
-													is_coordinator_only},
+						GPOS_NEW(mp) SForeignServer{
+							foreign_server_oid, pmdrel->GetRelDistribution()},
 						part_oid_array);
 				GPOS_ASSERT(fres);
 			}
@@ -168,7 +166,8 @@ CXformExpandDynamicGetWithForeignPartitions::Transform(CXformContext *pxfctxt,
 				mp, new_alias, popGet->Ptabdesc(), popGet->ScanId(), pdrgpcrNew,
 				popGet->PdrgpdrgpcrPart(), non_foreign_parts,
 				popGet->GetPartitionConstraintsDisj(), popGet->FStaticPruned(),
-				GPOS_NEW(mp) IMdIdArray(mp) /* foreign_server_mdids */);
+				GPOS_NEW(mp) IMdIdArray(mp) /* foreign_server_mdids */,
+				hasSecurityQuals);
 		CExpression *pexprNonForeignDynamicGet =
 			GPOS_NEW(mp) CExpression(mp, nonForeignDynamicGet);
 
@@ -215,7 +214,7 @@ CXformExpandDynamicGetWithForeignPartitions::Transform(CXformContext *pxfctxt,
 									  popGet->ScanId(), pdrgpcrNew,
 									  popGet->PdrgpdrgpcrPart(), part_oid_array,
 									  foreign_server.m_foreign_server_oid,
-									  foreign_server.m_is_coordinator_only);
+									  foreign_server.m_exec_location);
 		CExpression *pexprDynamicForeignGet =
 			GPOS_NEW(mp) CExpression(mp, dynamicForeignGet);
 

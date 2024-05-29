@@ -6,7 +6,7 @@
 
 -- Suppress NOTICE messages when users/groups don't exist
 SET client_min_messages TO 'warning';
-
+set optimizer_trace_fallback to on;
 DROP USER IF EXISTS regress_rls_alice;
 DROP USER IF EXISTS regress_rls_bob;
 DROP USER IF EXISTS regress_rls_carol;
@@ -1864,6 +1864,26 @@ SELECT * FROM rls_tbl;
 DROP TABLE rls_tbl;
 RESET SESSION AUTHORIZATION;
 
+-- CVE-2023-2455: inlining an SRF may introduce an RLS dependency
+create table rls_t (c text);
+insert into rls_t values ('invisible to bob');
+alter table rls_t enable row level security;
+grant select on rls_t to regress_rls_alice, regress_rls_bob;
+create policy p1 on rls_t for select to regress_rls_alice using (true);
+create policy p2 on rls_t for select to regress_rls_bob using (false);
+create function rls_f () returns setof rls_t
+  stable language sql
+  as $$ select * from rls_t $$;
+prepare q as select current_user, * from rls_f();
+set role regress_rls_alice;
+execute q;
+set role regress_rls_bob;
+execute q;
+
+RESET ROLE;
+DROP FUNCTION rls_f();
+DROP TABLE rls_t;
+
 --
 -- Clean up objects
 --
@@ -1896,3 +1916,4 @@ CREATE POLICY p1 ON rls_tbl_force USING (c1 = 5) WITH CHECK (c1 < 5);
 CREATE POLICY p2 ON rls_tbl_force FOR SELECT USING (c1 = 8);
 CREATE POLICY p3 ON rls_tbl_force FOR UPDATE USING (c1 = 8) WITH CHECK (c1 >= 5);
 CREATE POLICY p4 ON rls_tbl_force FOR DELETE USING (c1 = 8);
+reset optimizer_trace_fallback;

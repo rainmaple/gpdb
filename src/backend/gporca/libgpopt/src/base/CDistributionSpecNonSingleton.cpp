@@ -42,8 +42,8 @@ CDistributionSpecNonSingleton::CDistributionSpecNonSingleton() = default;
 //
 //---------------------------------------------------------------------------
 CDistributionSpecNonSingleton::CDistributionSpecNonSingleton(
-	BOOL fAllowReplicated, BOOL fAllowEnforced)
-	: m_fAllowReplicated(fAllowReplicated), m_fAllowEnforced(fAllowEnforced)
+	BOOL fAllowReplicated)
+	: m_fAllowReplicated(fAllowReplicated)
 {
 }
 
@@ -114,8 +114,9 @@ CDistributionSpecNonSingleton::AppendEnforcers(CMemoryPool *mp,
 		// the motion node is enforced on top of a child
 		// deriving universal spec or replicated distribution, this motion node
 		// will be translated to a result node with hash filter to remove
-		// duplicates
+		// duplicates, therefore we also need to mark it as duplicate sensitive
 		random_dist_spec = GPOS_NEW(mp) CDistributionSpecRandom();
+		random_dist_spec->MarkDuplicateSensitive();
 	}
 	else
 	{

@@ -28,12 +28,12 @@ OBJS        = CParseHandlerAgg.o \
               CParseHandlerCostParams.o \
               CParseHandlerCtasStorageOptions.o \
               CParseHandlerDXL.o \
-              CParseHandlerDefaultValueExpr.o \
               CParseHandlerDirectDispatchInfo.o \
               CParseHandlerDistinctComp.o \
               CParseHandlerDummy.o \
               CParseHandlerDynamicForeignScan.o \
               CParseHandlerDynamicIndexScan.o \
+              CParseHandlerDynamicIndexOnlyScan.o \
               CParseHandlerDynamicTableScan.o \
               CParseHandlerEnumeratorConfig.o \
               CParseHandlerForeignScan.o \
@@ -108,6 +108,7 @@ OBJS        = CParseHandlerAgg.o \
               CParseHandlerPhysicalTVF.o \
               CParseHandlerPhysicalWindow.o \
               CParseHandlerPlan.o \
+              CParseHandlerPlanHint.o \
               CParseHandlerProjElem.o \
               CParseHandlerProjList.o \
               CParseHandlerProperties.o \
@@ -144,6 +145,7 @@ OBJS        = CParseHandlerAgg.o \
               CParseHandlerScalarConstValue.o \
               CParseHandlerScalarDMLAction.o \
               CParseHandlerScalarExpr.o \
+              CParseHandlerScalarFieldSelect.o \
               CParseHandlerScalarFuncExpr.o \
               CParseHandlerScalarIdent.o \
               CParseHandlerScalarIfStmt.o \
@@ -155,6 +157,7 @@ OBJS        = CParseHandlerAgg.o \
               CParseHandlerScalarOp.o \
               CParseHandlerScalarOpExpr.o \
               CParseHandlerScalarOpList.o \
+              CParseHandlerScalarParam.o \
               CParseHandlerScalarSubPlan.o \
               CParseHandlerScalarSubPlanParam.o \
               CParseHandlerScalarSubPlanParamList.o \
@@ -180,7 +183,6 @@ OBJS        = CParseHandlerAgg.o \
               CParseHandlerStatsBound.o \
               CParseHandlerStatsDerivedColumn.o \
               CParseHandlerStatsDerivedRelation.o \
-              CParseHandlerSubqueryScan.o \
               CParseHandlerTableDescr.o \
               CParseHandlerTableScan.o \
               CParseHandlerTraceFlags.o \

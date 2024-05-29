@@ -42,6 +42,7 @@
 #include "commands/progress.h"
 #include "commands/tablecmds.h"
 #include "commands/tablespace.h"
+#include "commands/vacuum.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -110,6 +111,9 @@ static void ReindexPartitions(Oid relid, int options, bool concurrent, bool isTo
 static void ReindexMultipleInternal(List *relids, int options, bool concurrent);
 static void reindex_error_callback(void *args);
 static void update_relispartition(Oid relationId, bool newval);
+static void dispatch_create_index(IndexStmt *stmt, Oid root_save_userid,
+								  int root_save_sec_context);
+
 
 /*
  * callback argument type for RangeVarCallbackForReindexIndex()
@@ -140,8 +144,26 @@ cdb_sync_indcheckxmin_with_segments(Oid indexRelationId)
 	int			i;
 	char		cmd[100];
 	bool		indcheckxmin_set_in_any_segment;
+	Relation	pg_index_rel;
 
 	Assert(Gp_role == GP_ROLE_DISPATCH && !IsBootstrapProcessingMode());
+
+	/*
+	 * The query to check on indcheckxmin on segments will acquire AccessShareLock
+	 * on pg_index table, and wouldn't release until the end of the transaction.
+	 * To avoid deadlock between coordinator and segments, we should acquire the
+	 * lock on coordinator in advance, and shouldn't release until the end of the
+	 * transaction.
+	 *
+	 * A typical deadlock case without acquiring the lock is:
+	 *
+	 *   T1: CREATE TABLE t1 (c1 int);
+	 *   T1: BEGIN;
+	 *   T1: CREATE INDEX idx on t1(c1);
+	 *   T2: VACUUM FULL pg_index;
+	 *   T1: SELECT * FROM t1;
+	 */
+	pg_index_rel = heap_open(IndexRelationId, AccessShareLock);
 
 	/*
 	 * Query all the segments, for their indcheckxmin value for this index.
@@ -205,6 +227,12 @@ cdb_sync_indcheckxmin_with_segments(Oid indexRelationId)
 		heap_freetuple(indexTuple);
 		heap_close(pg_index, RowExclusiveLock);
 	}
+
+	/*
+	 * Keep consistent with segments, don't release the lock until the end of
+	 * the transaction.
+	 */
+	heap_close(pg_index_rel, NoLock);
 }
 
 /*
@@ -702,6 +730,8 @@ DefineIndex(Oid relationId,
 				 errmsg("cannot use more than %d columns in an index",
 						INDEX_MAX_KEYS)));
 
+	SIMPLE_FAULT_INJECTOR("defineindex_before_acquire_lock");
+
 	/*
 	 * Only SELECT ... FOR UPDATE/SHARE are allowed while doing a standard
 	 * index build; but for concurrent builds we allow INSERT/UPDATE/DELETE
@@ -733,7 +763,7 @@ DefineIndex(Oid relationId,
 	 * we can use the same lock as heap tables.
 	 */
 	rel = table_open(relationId, NoLock);
-	if (RelationIsAppendOptimized(rel))
+	if (RelationStorageIsAO(rel))
 	{
 		GetAppendOnlyEntryAuxOids(rel, NULL, &blkdirrelid, NULL);
 
@@ -1121,7 +1151,7 @@ DefineIndex(Oid relationId,
 	 */
 	if (partitioned && (stmt->unique || stmt->primary))
 	{
-		PartitionKey key = RelationGetPartitionKey(rel);
+		PartitionKey key = RelationRetrievePartitionKey(rel);
 		const char *constraint_type;
 		int			i;
 
@@ -1323,9 +1353,10 @@ DefineIndex(Oid relationId,
 
 	/*
 	 * Create block directory if this is an appendoptimized
-	 * relation
+	 * relation and one not present currently
 	 */
-	AlterTableCreateAoBlkdirTable(RelationGetRelid(rel));
+	if (!OidIsValid(blkdirrelid))
+		AlterTableCreateAoBlkdirTable(RelationGetRelid(rel));
 
 	/*
 	 * Make the catalog entries for the index, including constraints. This
@@ -1353,7 +1384,7 @@ DefineIndex(Oid relationId,
 	 */
 	if (partitioned && stmt->relation && !stmt->relation->inh)
 	{
-		PartitionDesc pd = RelationGetPartitionDesc(rel);
+		PartitionDesc pd = RelationRetrievePartitionDesc(rel);
 
 		if (pd->nparts != 0)
 			flags |= INDEX_CREATE_INVALID;
@@ -1431,7 +1462,7 @@ DefineIndex(Oid relationId,
 		 *
 		 * If we're called internally (no stmt->relation), recurse always.
 		 */
-		partdesc = RelationGetPartitionDesc(rel);
+		partdesc = RelationRetrievePartitionDesc(rel);
 		if ((!stmt->relation || stmt->relation->inh) && partdesc->nparts > 0)
 		{
 			int			nparts = partdesc->nparts;
@@ -1677,26 +1708,8 @@ DefineIndex(Oid relationId,
 		stmt->idxname = indexRelationName;
 		if (shouldDispatch)
 		{
-			Oid			save_userid;
-			int			save_sec_context;
-			/* make sure the QE uses the same index name that we chose */
-			stmt->oldNode = InvalidOid;
-			Assert(stmt->relation != NULL);
-
 			stmt->tableSpace = get_tablespace_name(tablespaceId);
-			/*
-			 * Switch to login user, so that the connection to QEs use the
-			 * same user as the connection to QD.
-			 */
-			GetUserIdAndSecContext(&save_userid, &save_sec_context);
-			SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
-			CdbDispatchUtilityStatement((Node *) stmt,
-										DF_CANCEL_ON_ERROR |
-										DF_WITH_SNAPSHOT |
-										DF_NEED_TWO_PHASE,
-										GetAssignedOidsForDispatch(),
-										NULL);
-			SetUserIdAndSecContext(save_userid, save_sec_context);
+			dispatch_create_index(stmt, root_save_userid, root_save_sec_context);
 		}
 
 		/*
@@ -1714,24 +1727,7 @@ DefineIndex(Oid relationId,
 	stmt->idxname = indexRelationName;
 	if (shouldDispatch)
 	{
-		Oid			save_userid;
-		int			save_sec_context;
-		/* make sure the QE uses the same index name that we chose */
-		stmt->oldNode = InvalidOid;
-		Assert(stmt->relation != NULL);
-		/*
-		 * Switch to login user, so that the connection to QEs use the
-		 * same user as the connection to QD.
-		 */
-		GetUserIdAndSecContext(&save_userid, &save_sec_context);
-		SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
-		CdbDispatchUtilityStatement((Node *) stmt,
-									DF_CANCEL_ON_ERROR |
-									DF_WITH_SNAPSHOT |
-									DF_NEED_TWO_PHASE,
-									GetAssignedOidsForDispatch(),
-									NULL);
-		SetUserIdAndSecContext(save_userid, save_sec_context);
+		dispatch_create_index(stmt, root_save_userid, root_save_sec_context);
 
 		/* Set indcheckxmin in the coordinator, if it was set on any segment */
 		if (!indexInfo->ii_BrokenHotChain)
@@ -1950,6 +1946,46 @@ DefineIndex(Oid relationId,
 	return address;
 }
 
+/*
+ * Helper to dispatch a CREATE INDEX command to QEs.
+ */
+static void
+dispatch_create_index(IndexStmt *stmt, Oid root_save_userid,
+					  int root_save_sec_context)
+{
+	Oid			save_userid;
+	int			save_sec_context;
+	struct CdbPgResults cdb_pgresults;
+	VacuumStatsContext stats_context;
+
+	/* make sure the QE uses the same index name that we chose */
+	stmt->oldNode = InvalidOid;
+	Assert(RelationIsValid(stmt->relation));
+	Assert(IS_QUERY_DISPATCHER());
+
+	/*
+	 * Switch to login user, so that the connection to QEs use the
+	 * same user as the connection to QD.
+	 */
+	GetUserIdAndSecContext(&save_userid, &save_sec_context);
+	SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
+	CdbDispatchUtilityStatement((Node *) stmt,
+								DF_CANCEL_ON_ERROR |
+								DF_WITH_SNAPSHOT |
+								DF_NEED_TWO_PHASE,
+								GetAssignedOidsForDispatch(),
+								&cdb_pgresults);
+	SetUserIdAndSecContext(save_userid, save_sec_context);
+	/*
+	 * XXX: Reuse vacuum stats combine function to aggregate post CREATE INDEX
+	 * relstats from QEs. We use vac_send_relstats_to_qd() for reporting these
+	 * stats (see index_update_stats()).
+	 */
+	stats_context.updated_stats = NIL;
+	vacuum_combine_stats(&stats_context, &cdb_pgresults, CurrentMemoryContext);
+	vac_update_relstats_from_list(&stats_context);
+	list_free(stats_context.updated_stats);
+}
 
 /*
  * CheckMutability

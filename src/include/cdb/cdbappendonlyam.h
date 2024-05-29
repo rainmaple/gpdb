@@ -36,6 +36,7 @@
 #include "utils/snapshot.h"
 
 #include "access/appendonlytid.h"
+#include "access/appendonlywriter.h"
 
 #include "cdb/cdbbufferedappend.h"
 #include "cdb/cdbbufferedread.h"
@@ -52,6 +53,17 @@
 #define MAX_APPENDONLY_BLOCK_SIZE			 (2 * 1024 * 1024)
 #define DEFAULT_VARBLOCK_TEMPSPACE_LEN   	 (4 * 1024)
 #define DEFAULT_FS_SAFE_WRITE_SIZE			 (0)
+#define DEFAULT_COMPRESS_TYPE				("none")
+
+/*
+ * Check if an attribute value is missing in an AO/CO row according to the row number
+ * and the mapping from attnum to "lastrownum" for the corresponding table/segment.
+ *
+ * See comment for AppendOnlyExecutorReadBlock_BindingInit() for an explanation 
+ * on AO tables, which applies to CO tables as well.
+ */
+#define AO_ATTR_VAL_IS_MISSING(rowNum, colno, segmentFileNum, attnum_to_rownum) \
+		((rowNum) <= (attnum_to_rownum)[(colno) * MAX_AOREL_CONCURRENCY + (segmentFileNum)])
 
 extern AppendOnlyBlockDirectory *GetAOBlockDirectory(Relation relation);
 
@@ -120,6 +132,8 @@ typedef struct AppendOnlyExecutorReadBlock
 
 	AppendOnlyStorageRead	*storageRead;
 
+	AttrNumber 		curLargestAttnum; /* the largest attnum stored in memtuple currently being read */
+	int64 			*attnum_to_rownum; /*attnum to rownum mapping, used in building memtuple binding */
 	MemTupleBinding *mt_bind;
 	/*
 	 * When reading a segfile that's using version < AOSegfileFormatVersion_GP5,
@@ -133,7 +147,8 @@ typedef struct AppendOnlyExecutorReadBlock
 
 	int				segmentFileNum;
 
-	int64			totalRowsScannned;
+	int64			totalRowsScanned;
+	int64			blockRowsProcessed;
 
 	int64			blockFirstRowNum;
 	int64			headerOffsetInFile;
@@ -199,7 +214,7 @@ typedef struct AppendOnlyScanDescData
 	AppendOnlyExecutorReadBlock	executorReadBlock;
 
 	/* current scan state */
-	bool		bufferDone;
+	bool		needNextBuffer;
 
 	bool	initedStorageRoutines;
 
@@ -229,10 +244,33 @@ typedef struct AppendOnlyScanDescData
 	AppendOnlyVisimap visibilityMap;
 
 	/*
-	 * Only used by `analyze`
+	 * used by `analyze`
 	 */
-	int64		nextTupleId;
-	int64		targetTupleId;
+
+	/*
+	 * targrow: the output of the Row-based sampler (Alogrithm S), denotes a
+	 * rownumber in the flattened row number space that is the target of a sample,
+	 * which starts from 0.
+	 * In other words, if we have seg0 rownums: [1, 100], seg1 rownums: [1, 200]
+	 * If targrow = 150, then we are referring to seg1's rownum=51.
+	 *
+	 * In the context of TABLESAMPLE, this is the next row to be sampled.
+	 */
+	int64				targrow;
+
+	/*
+	 * segfirstrow: pointing to the next starting row which is used to check
+	 * the distance to `targrow`
+	 */
+	int64				segfirstrow;
+
+	/*
+	 * segrowsprocessed: track the rows processed under the current segfile.
+	 * Don't miss updating it accordingly when "segfirstrow" is updated.
+	 */
+	int64				segrowsprocessed;
+
+	AOBlkDirScan		blkdirscan;
 
 	/* For Bitmap scan */
 	int			rs_cindex;		/* current tuple's index in tbmres->offsets */
@@ -244,6 +282,19 @@ typedef struct AppendOnlyScanDescData
 	 */
 	int64		totalBytesRead;
 
+	/*
+	 * The next block of AO_MAX_TUPLES_PER_HEAP_BLOCK tuples to be considered
+	 * for TABLESAMPLE. This only corresponds to tuples that are physically
+	 * present in segfiles (excludes aborted tuples). This "block" is purely a
+	 * logical grouping of tuples (in the flat row number space spanning segs).
+	 * It does NOT correspond to the concept of a "logical heap block" (block
+	 * number in a ctid).
+	 *
+	 * The choice of AO_MAX_TUPLES_PER_HEAP_BLOCK is somewhat arbitrary. It
+	 * could have been anything (that can be represented with an OffsetNumber,
+	 * to comply with the TSM API).
+	 */
+	int64 		sampleTargetBlk;
 }	AppendOnlyScanDescData;
 
 typedef AppendOnlyScanDescData *AppendOnlyScanDesc;
@@ -387,7 +438,10 @@ typedef struct AppendOnlyDeleteDescData *AppendOnlyDeleteDesc;
 typedef struct AppendOnlyUniqueCheckDescData
 {
 	AppendOnlyBlockDirectory *blockDirectory;
+	/* visimap to check for deleted tuples as part of INSERT/COPY */
 	AppendOnlyVisimap 		 *visimap;
+	/* visimap support structure to check for deleted tuples as part of UPDATE */
+	AppendOnlyVisimapDelete  *visiMapDelete;
 } AppendOnlyUniqueCheckDescData;
 
 typedef struct AppendOnlyUniqueCheckDescData *AppendOnlyUniqueCheckDesc;
@@ -433,6 +487,9 @@ extern void appendonly_endscan(TableScanDesc scan);
 extern bool appendonly_getnextslot(TableScanDesc scan,
 								   ScanDirection direction,
 								   TupleTableSlot *slot);
+extern bool appendonly_get_target_tuple(AppendOnlyScanDesc aoscan,
+										int64 targrow,
+										TupleTableSlot *slot);
 extern AppendOnlyFetchDesc appendonly_fetch_init(
 	Relation 	relation,
 	Snapshot    snapshot,
@@ -465,6 +522,9 @@ extern TM_Result appendonly_delete(
 		AOTupleId* aoTupleId);
 extern void appendonly_delete_finish(AppendOnlyDeleteDesc aoDeleteDesc);
 
+extern bool appendonly_positionscan(AppendOnlyScanDesc aoscan,
+									AppendOnlyBlockDirectoryEntry *dirEntry,
+									int fsInfoIdx);
 /*
  * Update total bytes read for the entire scan. If the block was compressed,
  * update it with the compressed length. If the block was not compressed, update
@@ -479,6 +539,23 @@ AppendOnlyScanDesc_UpdateTotalBytesRead(AppendOnlyScanDesc scan)
 		scan->totalBytesRead += scan->storageRead.current.compressedLen;
 	else
 		scan->totalBytesRead += scan->storageRead.current.uncompressedLen;
+}
+
+static inline int64
+AppendOnlyScanDesc_TotalTupCount(AppendOnlyScanDesc scan)
+{
+	Assert(scan != NULL);
+
+	int64 totalrows = 0;
+	FileSegInfo **seginfo = scan->aos_segfile_arr;
+
+    for (int i = 0; i < scan->aos_total_segfiles; i++)
+    {
+	    if (seginfo[i]->state != AOSEG_STATE_AWAITING_DROP)
+		    totalrows += seginfo[i]->total_tupcount;
+    }
+
+    return totalrows;
 }
 
 #endif   /* CDBAPPENDONLYAM_H */

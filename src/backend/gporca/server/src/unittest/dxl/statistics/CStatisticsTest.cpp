@@ -133,8 +133,8 @@ CStatisticsTest::EresUnittest_UnionAll()
 				mp, md_accessor, dxl_derived_rel_stats_array);
 		dxl_derived_rel_stats_array->Release();
 
-		GPOS_ASSERT(nullptr != pdrgpstatBefore);
-		GPOS_ASSERT(2 == pdrgpstatBefore->Size());
+		GPOS_UNITTEST_ASSERT(nullptr != pdrgpstatBefore);
+		GPOS_UNITTEST_ASSERT(2 == pdrgpstatBefore->Size());
 		CStatistics *pstats1 = (*pdrgpstatBefore)[0];
 		CStatistics *pstats2 = (*pdrgpstatBefore)[1];
 
@@ -149,7 +149,7 @@ CStatisticsTest::EresUnittest_UnionAll()
 				mp, pstats1, pstats2, pdrgpulColIdOutput, pdrgpulColIdInput1,
 				pdrgpulColIdInput2);
 
-		GPOS_ASSERT(nullptr != pstatsOutput);
+		GPOS_UNITTEST_ASSERT(nullptr != pstatsOutput);
 
 		CStatisticsArray *pdrgpstatOutput = GPOS_NEW(mp) CStatisticsArray(mp);
 		pdrgpstatOutput->Append(pstatsOutput);
@@ -317,8 +317,10 @@ CStatisticsTest::PtabdescTwoColumnSource(CMemoryPool *mp,
 		nameTable,
 		false,	// convert_hash_to_random
 		IMDRelation::EreldistrRandom, IMDRelation::ErelstorageHeap,
+		IMDRelation::GetCurrentAOVersion(),
 		0,	 // ulExecuteAsUser
 		-1,	 // lockmode
+		2,	 // aclmode SELECT
 		0	 // UNASSIGNED_QUERYID
 	);
 
@@ -398,8 +400,8 @@ CStatisticsTest::EresUnittest_CStatisticsBasic()
 	{
 		// create column references for grouping columns
 		(void) col_factory->PcrCreate(
-			pmdtypeint4, default_type_modifier, nullptr, 0 /* attno */,
-			false /*IsNullable*/, 1 /* id */, CName(&strColA),
+			pmdtypeint4, default_type_modifier, true /*mark_as_used*/, nullptr,
+			0 /* attno */, false /*IsNullable*/, 1 /* id */, CName(&strColA),
 			pexprGet->Pop()->UlOpId(), false /*IsDistCol*/
 		);
 	}
@@ -407,8 +409,8 @@ CStatisticsTest::EresUnittest_CStatisticsBasic()
 	if (nullptr == col_factory->LookupColRef(2 /*id*/))
 	{
 		(void) col_factory->PcrCreate(
-			pmdtypeint4, default_type_modifier, nullptr, 1 /* attno */,
-			false /*IsNullable*/, 2 /* id */, CName(&strColB),
+			pmdtypeint4, default_type_modifier, true /*mark_as_used*/, nullptr,
+			1 /* attno */, false /*IsNullable*/, 2 /* id */, CName(&strColB),
 			pexprGet->Pop()->UlOpId(), false /*IsDistCol*/
 		);
 	}
@@ -416,8 +418,8 @@ CStatisticsTest::EresUnittest_CStatisticsBasic()
 	if (nullptr == col_factory->LookupColRef(10 /*id*/))
 	{
 		(void) col_factory->PcrCreate(
-			pmdtypeint4, default_type_modifier, nullptr, 2 /* attno */,
-			false /*IsNullable*/, 10 /* id */, CName(&strColC),
+			pmdtypeint4, default_type_modifier, true /*mark_as_used*/, nullptr,
+			2 /* attno */, false /*IsNullable*/, 10 /* id */, CName(&strColC),
 			pexprGet->Pop()->UlOpId(), false /*IsDistCol*/
 		);
 	}
@@ -595,8 +597,8 @@ CStatisticsTest::Pdrgpstatspred2(CMemoryPool *mp)
 		GPOS_NEW(mp) CWStringDynamic(mp, GPOS_WSZ_LIT("HxEAAA=="));
 	CWStringDynamic *pstrUpperDate =
 		GPOS_NEW(mp) CWStringDynamic(mp, GPOS_WSZ_LIT("LREAAA=="));
-	LINT lLowerDate = LINT(4383);
-	LINT lUpperDate = LINT(4397);
+	LINT lLowerDate = LINT(INT64_C(378691200000000));
+	LINT lUpperDate = LINT(INT64_C(379900800000000));
 	StatsFilterGeneric(mp, 4, GPDB_DATE, pstrLowerDate, pstrUpperDate,
 					   lLowerDate, lUpperDate, pdrgpstatspred);
 

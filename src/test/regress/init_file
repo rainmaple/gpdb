@@ -12,9 +12,15 @@ m/^NOTICE:  extension "gp_inject_fault" already exists, skipping/
 # of the test. Ignore the NOTICE if it exists already.
 m/NOTICE:  extension "gp_debug_numsegments" already exists, skipping/
 
+# Some tests use the postgres_fdw extension, and create it at the beginning
+# of the test. Ignore the NOTICE if it exists already.
+m/NOTICE:  extension "postgres_fdw" already exists, skipping/
+
 m/^ Optimizer status:.*/
 m/^ Optimizer: Pivotal Optimizer \(GPORCA\).*/
 m/^ Optimizer: Postgres query optimizer/
+m/^ Optimizer: GPORCA/
+m/^ Optimizer: Postgres-based planner/
 m/^ Settings:.*/
 
 # There are a number of NOTICE and HINT messages around table distribution,
@@ -91,6 +97,16 @@ m/^DEBUG:  probing availability of JIT provider/
 m/^DEBUG:  LLVMJIT detected CPU/
 m/^DEBUG:  time to inline:/
 
+# Ignore creating zero-column table warning
+m/^WARNING:  creating a table with no columns./
+
+# Ignore data access indicator notice.
+m/NOTICE:  specifying ".*" acts as no operation./
+
+# Ignore "terminating connection due to administrator command" as the output is
+# not always echoed to the client.
+m/FATAL:  terminating connection due to administrator command/
+
 -- end_matchignore
 
 -- start_matchsubs
@@ -125,6 +141,8 @@ m/ERROR:  FIPS enabled OpenSSL is required for strict FIPS mode .*/
 s/ERROR:  FIPS enabled OpenSSL is required for strict FIPS mode .*/ERROR:  FIPS enabled OpenSSL is required for strict FIPS mode (openssl.c:XXX)/
 m/ERROR:  requested functionality not allowed in FIPS mode .*/
 s/ERROR:  requested functionality not allowed in FIPS mode .*/ERROR:  requested functionality not allowed in FIPS mode (openssl.c:XXX)/
+m/ERROR:  could not devise a plan.*/
+s/ERROR:  could not devise a plan.*/ERROR:  could not devise a plan (cdbpath.c:XXX)/
 
 # Mask out OpenSSL behavior change in different version
 m/ERROR:  Cannot use "md5": No such hash algorithm/
@@ -159,6 +177,9 @@ s/.//gs
 m/\(dbsize\.c\:\d+\)/
 s/\(dbsize\.c:\d+\)/\(dbsize\.c:XXX\)/
 
+m/\(cdbmutate\.c\:\d+\)/
+s/\(cdbmutate\.c:\d+\)/\(cdbmutate\.c:XXX\)/
+
 # remove the cdbdisp_async suffix of some ERROR messages
 m/ \(cdbdisp_async\.c.*\)/
 s/ \(cdbdisp_async\.c.*\)//
@@ -185,4 +206,13 @@ s/^\s+QUERY PLAN\s*$/ QUERY PLAN \n/
 m/^------------+\s*$/
 s/^------------+\s*$/------------\n/
 
+# ignore Heap Blocks: {exact,lossy} counter values in EXPLAIN outputs
+-- m/Heap Blocks: exact=\d+/
+-- s/Heap Blocks: exact=\d+/Heap Blocks: exact=###/
+-- m/Heap Blocks: lossy=\d+/
+-- s/Heap Blocks: lossy=\d+/Heap Blocks: lossy=###/
+
+# ignore resource queue ids
+m/resource queue id: \d+/
+s/resource queue id: \d+/resource queue id: XXXX/
 -- end_matchsubs

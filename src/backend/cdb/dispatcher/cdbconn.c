@@ -162,12 +162,15 @@ cdbconn_doConnectStart(SegmentDatabaseDescriptor *segdbDesc,
 
 	/*
 	 * For entry DB connection, we make sure both "hostaddr" and "host" are
-	 * empty string. Or else, it will fall back to environment variables and
-	 * won't use domain socket in function connectDBStart. Also we set the
+	 * empty string, as we want to force Unix domain socket usage. The reason is
+	 * that for same host communication, Unix domain sockets are more performant.
+	 * However, if the PGHOST or PGHOSTADDR variables are set in the coordinator
+	 * postmaster environment, TCP/IP sockets will still be used. Also, we set the
 	 * connection type for entrydb connection so that QE could change Gp_role
 	 * from DISPATCH to EXECUTE.
 	 *
-	 * For other QE connections, we set "hostaddr". "host" is not used.
+	 * For other QE connections, we set "hostaddr". "host" is not used, as
+	 * hostaddr saves on the cost of hostname resolution.
 	 */
 	if (segdbDesc->segindex == COORDINATOR_CONTENT_ID &&
 		IS_QUERY_DISPATCHER())
@@ -523,7 +526,7 @@ struct QENotice
 	char		sqlstate[6];
 	char		severity[10];
 	char	   *file;
-	char		line[10];
+	char	   *line;
 	char	   *func;
 	char	   *message;
 	char	   *whoami;
@@ -556,9 +559,9 @@ MPPnoticeReceiver(void *arg, const PGresult *res)
 	int			elevel = INFO;
 	char	   *sqlstate = "00000";
 	char	   *severity = "WARNING";
-	char	   *file = "";
+	char	   *file = NULL;
 	char	   *line = NULL;
-	char	   *func = "";
+	char	   *func = NULL;
 	char	   *message= "missing error text";
 	char	   *detail = NULL;
 	char	   *hint = NULL;
@@ -646,6 +649,7 @@ MPPnoticeReceiver(void *arg, const PGresult *res)
 		uint64		size;
 		char	   *bufptr;
 		int			file_len;
+		int			line_len;
 		int			func_len;
 		int			detail_len;
 		int			hint_len;
@@ -675,6 +679,7 @@ MPPnoticeReceiver(void *arg, const PGresult *res)
 
 		size = offsetof(QENotice, buf);
 		SIZE_VARLEN_FIELD(file);
+		SIZE_VARLEN_FIELD(line);
 		SIZE_VARLEN_FIELD(func);
 		SIZE_VARLEN_FIELD(detail);
 		SIZE_VARLEN_FIELD(hint);
@@ -716,7 +721,7 @@ MPPnoticeReceiver(void *arg, const PGresult *res)
 		strlcpy(notice->sqlstate, sqlstate, sizeof(notice->sqlstate));
 		strlcpy(notice->severity, severity, sizeof(notice->severity));
 		COPY_VARLEN_FIELD(file);
-		strlcpy(notice->line, line, sizeof(notice->line));
+		COPY_VARLEN_FIELD(line);
 		COPY_VARLEN_FIELD(func);
 		COPY_VARLEN_FIELD(detail);
 		COPY_VARLEN_FIELD(hint);
@@ -815,7 +820,7 @@ forwardQENotices(void)
 					pq_sendstring(&msgbuf, notice->file);
 				}
 
-				if (notice->line[0])
+				if (notice->line)
 				{
 					pq_sendbyte(&msgbuf,PG_DIAG_SOURCE_LINE);
 					pq_sendstring(&msgbuf, notice->line);

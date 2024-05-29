@@ -341,7 +341,7 @@ typedef struct _tableInfo
 	uint32		toast_minmxid;	/* toast table's relminmxid */
 	int			ncheck;			/* # of CHECK expressions */
 	Oid			reltype;		/* OID of table's composite type, if any */
-	char	   *reloftype;		/* underlying type for typed table */
+	Oid			reloftype;		/* underlying type for typed table */
 	/* these two are set only if table is a sequence owned by a column: */
 	Oid			owning_tab;		/* OID of table owning sequence */
 	int			owning_col;		/* attr # of column owning sequence */
@@ -352,6 +352,7 @@ typedef struct _tableInfo
 	bool		dummy_view;		/* view's real definition must be postponed */
 	bool		postponed_def;	/* matview must be postponed into post-data */
 	bool		ispartition;	/* is table a partition? */
+	bool		unsafe_partitions;	/* is it an unsafe partitioned table? */
 
 	/*
 	 * These fields are computed only if we decide the table is interesting
@@ -379,8 +380,6 @@ typedef struct _tableInfo
 	char	  **attencoding;	/* the attribute encoding values */
 	struct _attrDefInfo **attrdefs; /* DEFAULT expressions */
 	struct _constraintInfo *checkexprs; /* CHECK constraints */
-	char	   *partkeydef;		/* partition key definition */
-	char	   *partbound;		/* partition bound definition */
 	bool		needs_override; /* has GENERATED ALWAYS AS IDENTITY */
 	char	   *amname;			/* relation access method */
 
@@ -399,7 +398,6 @@ typedef struct _tableInfo
 
 	/* GPDB */
 	Oid		toast_index; 				/* OID of toast table's index */
-	Oid		toast_type;					/* OID of toast table's composite type */
 	struct _aotableInfo	*aotbl; /* AO auxilliary table metadata */
 	char	*distclause; /* distributed by clause */
 	char	*partclause;	/* partition definition, if table is partition parent */
@@ -765,6 +763,7 @@ extern ConvInfo *getConversions(Archive *fout, int *numConversions);
 extern TableInfo *getTables(Archive *fout, int *numTables);
 extern void getOwnedSeqs(Archive *fout, TableInfo tblinfo[], int numTables);
 extern InhInfo *getInherits(Archive *fout, int *numInherits);
+extern void getPartitioningInfo(Archive *fout);
 extern void getIndexes(Archive *fout, TableInfo tblinfo[], int numTables);
 extern void getExtendedStatistics(Archive *fout);
 extern void getConstraints(Archive *fout, TableInfo tblinfo[], int numTables);
@@ -801,6 +800,7 @@ extern ExtProtInfo *getExtProtocols(Archive *fout, int *numExtProtocols);
 extern BinaryUpgradeInfo *getBinaryUpgradeObjects(void);
 extern void getAOTableInfo(Archive *fout);
 extern void getBMIndxInfo(Archive *fout);
+extern void getPartitionDefs(Archive *fout, TableInfo tblinfo[], int numTables);
 /* END MPP ADDITION */
 
 #endif							/* PG_DUMP_H */

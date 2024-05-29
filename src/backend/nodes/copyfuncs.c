@@ -690,14 +690,9 @@ _copyDynamicIndexScan(const DynamicIndexScan *from)
 	return newnode;
 }
 
-/*
- * _copyIndexOnlyScan
- */
-static IndexOnlyScan *
-_copyIndexOnlyScan(const IndexOnlyScan *from)
+static void
+CopyIndexOnlyScanFields(const IndexOnlyScan *from, IndexOnlyScan *newnode)
 {
-	IndexOnlyScan *newnode = makeNode(IndexOnlyScan);
-
 	/*
 	 * copy node superclass fields
 	 */
@@ -712,6 +707,34 @@ _copyIndexOnlyScan(const IndexOnlyScan *from)
 	COPY_NODE_FIELD(indexorderby);
 	COPY_NODE_FIELD(indextlist);
 	COPY_SCALAR_FIELD(indexorderdir);
+}
+
+/*
+ * _copyIndexOnlyScan
+ */
+static IndexOnlyScan *
+_copyIndexOnlyScan(const IndexOnlyScan *from)
+{
+	IndexOnlyScan *newnode = makeNode(IndexOnlyScan);
+
+	CopyIndexOnlyScanFields(from, newnode);
+
+	return newnode;
+}
+
+/*
+ * _copyDynamicIndexOnlyScan
+ */
+static DynamicIndexOnlyScan *
+_copyDynamicIndexOnlyScan(const DynamicIndexOnlyScan *from)
+{
+	DynamicIndexOnlyScan  *newnode = makeNode(DynamicIndexOnlyScan);
+
+	/* DynamicIndexScan has some content from IndexScan */
+	CopyIndexOnlyScanFields(&from->indexscan, &newnode->indexscan);
+	COPY_NODE_FIELD(partOids);
+	COPY_NODE_FIELD(part_prune_info);
+	COPY_NODE_FIELD(join_prune_paramids);
 
 	return newnode;
 }
@@ -1081,8 +1104,6 @@ CopyJoinFields(const Join *from, Join *newnode)
 	CopyPlanFields((const Plan *) from, (Plan *) newnode);
 
     COPY_SCALAR_FIELD(prefetch_inner);
-	COPY_SCALAR_FIELD(prefetch_joinqual);
-	COPY_SCALAR_FIELD(prefetch_qual);
 
 	COPY_SCALAR_FIELD(jointype);
 	COPY_SCALAR_FIELD(inner_unique);
@@ -1200,6 +1221,7 @@ _copyShareInputScan(const ShareInputScan *from)
 	COPY_SCALAR_FIELD(producer_slice_id);
 	COPY_SCALAR_FIELD(this_slice_id);
 	COPY_SCALAR_FIELD(nconsumers);
+	COPY_SCALAR_FIELD(discard_output);
 
 	return newnode;
 }
@@ -1281,6 +1303,7 @@ _copyDQAExpr(const DQAExpr *from)
     COPY_SCALAR_FIELD(agg_expr_id);
     COPY_BITMAPSET_FIELD(agg_args_id_bms);
     COPY_NODE_FIELD(agg_filter);
+	COPY_BITMAPSET_FIELD(agg_vars_ref);
 
     return newnode;
 }
@@ -1491,7 +1514,6 @@ _copyPlanRowMark(const PlanRowMark *from)
 	COPY_SCALAR_FIELD(strength);
 	COPY_SCALAR_FIELD(waitPolicy);
 	COPY_SCALAR_FIELD(isParent);
-	COPY_SCALAR_FIELD(canOptSelectLockingClause);
 
 	return newnode;
 }
@@ -3957,7 +3979,7 @@ CopyCreateStmtFields(const CreateStmt *from, CreateStmt *newnode)
 	COPY_STRING_FIELD(tablespacename);
 	COPY_STRING_FIELD(accessMethod);
 	COPY_SCALAR_FIELD(if_not_exists);
-	COPY_SCALAR_FIELD(gp_style_alter_part);
+	COPY_SCALAR_FIELD(origin);
 
 	COPY_NODE_FIELD(distributedBy);
 	COPY_NODE_FIELD(partitionBy);
@@ -5886,6 +5908,9 @@ copyObjectImpl(const void *from)
 			break;
 		case T_DynamicIndexScan:
 			retval = _copyDynamicIndexScan(from);
+			break;
+		case T_DynamicIndexOnlyScan:
+			retval = _copyDynamicIndexOnlyScan(from);
 			break;
 		case T_IndexOnlyScan:
 			retval = _copyIndexOnlyScan(from);

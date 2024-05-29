@@ -35,6 +35,9 @@ namespace gpopt
 {
 using namespace gpos;
 
+#define SORT_ASC 0
+#define SORT_DESC 1
+
 // fwd declaration
 class CMemo;
 class CLogicalCTEConsumer;
@@ -556,9 +559,6 @@ public:
 	// check if a given operator is a physical join
 	static BOOL FPhysicalJoin(COperator *pop);
 
-	// check if a given operator is a physical left outer join
-	static BOOL FPhysicalLeftOuterJoin(COperator *pop);
-
 	// check if a given operator is a physical scan
 	static BOOL FPhysicalScan(COperator *pop);
 
@@ -961,6 +961,13 @@ public:
 	static CExpression *PexprLimit(CMemoryPool *mp, CExpression *pexpr,
 								   ULONG ulOffSet, ULONG count);
 
+	// generate a limit expression on top of the given relational child with given offset, limit count and OrderSpec
+	static CExpression *BuildLimitExprWithOrderSpec(CMemoryPool *mp,
+													CExpression *pexpr,
+													COrderSpec *pos,
+													ULONG ulOffSet,
+													ULONG count);
+
 	// return true if given expression contains window aggregate function
 	static BOOL FHasAggWindowFunc(CExpression *pexpr);
 
@@ -1009,6 +1016,19 @@ public:
 	static BOOL FScalarConstBoolNull(CExpression *pexpr);
 
 	static BOOL FScalarConstOrBinaryCoercible(CExpression *pexpr);
+
+	static BOOL FScalarIdentNullTest(CExpression *pexpr);
+
+	static BOOL FContainsScalarIdentNullTest(CExpression *pexpr);
+
+	static CTableDescriptorHashSet *RemoveDuplicateMdids(
+		CMemoryPool *mp, CTableDescriptorHashSet *tabdescs);
+
+	static CExpression *ReplaceColrefWithProjectExpr(CMemoryPool *mp,
+													 CExpression *pexpr,
+													 CColRef *pcolref,
+													 CExpression *pprojExpr);
+
 };	// class CUtils
 
 // hash set from expressions

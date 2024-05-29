@@ -106,6 +106,21 @@ private:
 		}
 	};	// SContextIndexVarAttno
 
+	// context for finding security quals in an RTE
+	struct SContextSecurityQuals
+	{
+		// relid of the RTE to search in the rewritten parse tree
+		const OID m_relId;
+
+		// List to hold the security quals present in an RTE
+		List *m_security_quals{NIL};
+
+		// ctor
+		SContextSecurityQuals(const OID relId) : m_relId(relId)
+		{
+		}
+	};	// SContextSecurityQuals
+
 	// memory pool
 	CMemoryPool *m_mp;
 
@@ -142,6 +157,14 @@ private:
 	// walker to set inner var to outer
 	static BOOL SetHashKeysVarnoWalker(Node *node, void *context);
 
+	static BOOL FetchSecurityQualsWalker(
+		Node *node, SContextSecurityQuals *ctxt_security_quals);
+
+	static BOOL FetchSecurityQuals(Query *parsetree,
+								   SContextSecurityQuals *ctxt_security_quals);
+
+	static BOOL SetSecurityQualsVarnoWalker(Node *node, Index *index);
+
 public:
 	// ctor
 	CTranslatorDXLToPlStmt(CMemoryPool *mp, CMDAccessor *md_accessor,
@@ -169,6 +192,19 @@ public:
 private:
 	// Set the bitmapset of a plan to the list of param_ids defined by the plan
 	static void SetParamIds(Plan *);
+
+	static List *TranslatePartOids(IMdIdArray *parts, INT lockmode);
+
+	static List *TranslateJoinPruneParamids(
+		const ULongPtrArray *selector_ids, OID oid_type,
+		CContextDXLToPlStmt *dxl_to_plstmt_context);
+
+	void TranslatePlan(
+		Plan *plan, const CDXLNode *dxlnode,
+		CDXLTranslateContext *output_context,
+		CContextDXLToPlStmt *dxl_to_plstmt_context,
+		CDXLTranslateContextBaseTable *base_table_context,
+		CDXLTranslationContextArray *ctxt_translation_prev_siblings);
 
 	// translate DXL table scan node into a SeqScan node
 	Plan *TranslateDXLTblScan(
@@ -289,18 +325,15 @@ private:
 			ctxt_translation_prev_siblings	// translation contexts of previous siblings
 	);
 
-	Plan *TranslateDXLSubQueryScan(
-		const CDXLNode *subquery_scan_dxlnode,
-		CDXLTranslateContext *output_context,
-		CDXLTranslationContextArray *
-			ctxt_translation_prev_siblings	// translation contexts of previous siblings
-	);
 
-	Plan *TranslateDXLProjectSet(
-		const CDXLNode *result_dxlnode, CDXLTranslateContext *output_context,
-		CDXLTranslationContextArray *
-			ctxt_translation_prev_siblings	// translation contexts of previous siblings
-	);
+	Plan *TranslateDXLProjectSet(const CDXLNode *result_dxlnode);
+
+	Plan *CreateProjectSetNodeTree(const CDXLNode *result_dxlnode,
+								   Plan *result_node_plan, Plan *child_plan,
+								   Plan *&project_set_child_plan,
+								   BOOL &will_require_result_node);
+
+	void MutateFuncExprToVarProjectSet(Plan *final_plan);
 
 	Plan *TranslateDXLResult(
 		const CDXLNode *result_dxlnode, CDXLTranslateContext *output_context,
@@ -345,6 +378,14 @@ private:
 
 	// translate a dynamic index scan operator
 	Plan *TranslateDXLDynIdxScan(
+		const CDXLNode *dyn_idx_scan_dxlnode,
+		CDXLTranslateContext *output_context,
+		CDXLTranslationContextArray *
+			ctxt_translation_prev_siblings	// translation contexts of previous siblings
+	);
+
+	// translate a dynamic index only scan operator
+	Plan *TranslateDXLDynIdxOnlyScan(
 		const CDXLNode *dyn_idx_scan_dxlnode,
 		CDXLTranslateContext *output_context,
 		CDXLTranslationContextArray *
@@ -438,8 +479,7 @@ private:
 
 	// create range table entry from a table descriptor
 	Index ProcessDXLTblDescr(const CDXLTableDescr *table_descr,
-							 CDXLTranslateContextBaseTable *base_table_context,
-							 AclMode acl_mode);
+							 CDXLTranslateContextBaseTable *base_table_context);
 
 	// translate DXL projection list into a target list
 	List *TranslateDXLProjList(
@@ -476,6 +516,8 @@ private:
 		const CDXLTranslateContextBaseTable *base_table_context,
 		CDXLTranslationContextArray *child_contexts, List **targetlist_out,
 		List **qual_out, CDXLTranslateContext *output_context);
+
+	void AddSecurityQuals(OID relId, List **qual, Index *index);
 
 	// translate the hash expr list of a redistribute motion node
 	void TranslateHashExprList(const CDXLNode *hash_expr_list_dxlnode,
@@ -541,8 +583,7 @@ private:
 		const IMDRelation *md_rel, CDXLTranslateContext *output_context,
 		CDXLTranslateContextBaseTable *base_table_context,
 		CDXLTranslationContextArray *ctxt_translation_prev_siblings,
-		List **index_cond, List **index_orig_cond, List **index_strategy_list,
-		List **index_subtype_list);
+		List **index_cond, List **index_orig_cond);
 
 	// translate the index filters
 	List *TranslateDXLIndexFilter(
@@ -591,6 +632,15 @@ private:
 	static List *TranslateNestLoopParamList(
 		CDXLColRefArray *pdrgdxlcrOuterRefs, CDXLTranslateContext *dxltrctxLeft,
 		CDXLTranslateContext *dxltrctxRight);
+
+	static Node *FixUpperExprMutatorProjectSet(Node *node, List *context);
+
+	// checks if index is used for Order by.
+	bool IsIndexForOrderBy(
+		CDXLTranslateContextBaseTable *base_table_context,
+		CDXLTranslationContextArray *ctxt_translation_prev_siblings,
+		CDXLTranslateContext *output_context,
+		CDXLNode *index_cond_list_dxlnode);
 };
 }  // namespace gpdxl
 

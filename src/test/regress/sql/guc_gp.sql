@@ -1,3 +1,7 @@
+-- start_matchsubs
+-- m/\(cost=.*\)/
+-- s/\(cost=.*\)//
+-- end_matchsubs
 SELECT min_val, max_val FROM pg_settings WHERE name = 'gp_resqueue_priority_cpucores_per_segment';
 
 -- Test cursor gang should not be reused if SET command happens.
@@ -434,4 +438,25 @@ RESET log_statement;
 -- Try to set statement_mem > max_statement_mem
 SET statement_mem = '4000MB';
 RESET statement_mem;
+
+-- enabling gp_force_random_redistribution makes sure random redistribution happens
+-- only relevant to postgres optimizer
+set optimizer = false;
+
+create table t1_dist_rand(a int) distributed randomly;
+create table t2_dist_rand(a int) distributed randomly;
+create table t_dist_hash(a int) distributed by (a);
+
+-- with the GUC turned off, redistribution won't happen (no redistribution motion)
+set gp_force_random_redistribution = false;
+explain insert into t2_dist_rand select * from t1_dist_rand;
+explain insert into t2_dist_rand select * from t_dist_hash;
+
+-- with the GUC turned on, redistribution would happen
+set gp_force_random_redistribution = true;
+explain insert into t2_dist_rand select * from t1_dist_rand;
+explain insert into t2_dist_rand select * from t_dist_hash;
+
+reset gp_force_random_redistribution;
+reset optimizer;
 

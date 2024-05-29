@@ -147,6 +147,12 @@ public:
 		return m_rel_storage_type;
 	}
 
+	Erelaoversion
+	GetRelAOVersion() const override
+	{
+		return IMDRelation::GetCurrentAOVersion();
+	}
+
 	// CTAS storage options
 	CDXLCtasStorageOptions *
 	GetDxlCtasStorageOption() const override
@@ -255,6 +261,13 @@ public:
 	ForeignServer() const override
 	{
 		return nullptr;
+	}
+
+	CDouble
+	Rows() const override
+	{
+		GPOS_ASSERT("Function should not be called for CTAS tables");
+		return 0;
 	}
 
 #ifdef GPOS_DEBUG

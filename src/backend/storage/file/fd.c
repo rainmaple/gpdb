@@ -1562,6 +1562,7 @@ OpenTemporaryFile(bool interXact, const char *filePrefix)
 	if (!interXact)
 		RegisterTemporaryFile(file);
 
+	SIMPLE_FAULT_INJECTOR("after_open_temp_file");
 	return file;
 }
 
@@ -3236,7 +3237,7 @@ RemovePgTempRelationFilesInDbspace(const char *dbspacedirname)
  * temporary relation are kept in shared buffers, and need to be accessible
  * from multiple backends. So the pattern in GPDB is:
  *
- * t_<digits>, or t<digits>_<digits>_<forkname>
+ * t_<digits>, or t_<digits>_<forkname>
  */
 bool
 looks_like_temp_rel_name(const char *name)

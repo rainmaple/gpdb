@@ -1,6 +1,10 @@
 --
 -- AGGREGATES
 --
+-- start_matchsubs
+-- m/\(cost=.*\)/
+-- s/\(cost=.*\)//
+-- end_matchsubs
 
 -- start_ignore
 SET optimizer_trace_fallback to on;
@@ -1126,6 +1130,7 @@ create aggregate my_half_sum(int4)
    finalfunc = halfsum_finalfn
 );
 
+discard plans;
 -- Agg state should be shared even though my_sum has no finalfn
 select my_sum(one),my_half_sum(one) from (values(1),(2),(3),(4)) t(one);
 
@@ -1301,18 +1306,16 @@ select g%100000 as c1, sum(g::numeric) as c2, count(*) as c3
   from generate_series(0, 199999) g
   group by g%100000;
 
-/*
- * create table agg_group_2 as
- * select * from
- *   (values (100), (300), (500)) as r(a),
- *   lateral (
- *     select (g/2)::numeric as c1,
- *            array_agg(g::numeric) as c2,
- *            count(*) as c3
- *     from generate_series(0, 1999) g
- *     where g < r.a
- *     group by g/2) as s;
- */
+create table agg_group_2 as
+select * from
+  (values (100), (300), (500)) as r(a),
+  lateral (
+    select (g/2)::numeric as c1,
+           array_agg(g::numeric) as c2,
+           count(*) as c3
+    from generate_series(0, 1999) g
+    where g < r.a
+    group by g/2) as s;
 
 set jit_above_cost to default;
 
@@ -1343,18 +1346,16 @@ select g%100000 as c1, sum(g::numeric) as c2, count(*) as c3
   from generate_series(0, 199999) g
   group by g%100000;
 
-/*
- * create table agg_hash_2 as
- * select * from
- *   (values (100), (300), (500)) as r(a),
- *   lateral (
- *     select (g/2)::numeric as c1,
- *            array_agg(g::numeric) as c2,
- *            count(*) as c3
- *     from generate_series(0, 1999) g
- *     where g < r.a
- *     group by g/2) as s;
- */
+create table agg_hash_2 as
+select * from
+  (values (100), (300), (500)) as r(a),
+  lateral (
+    select (g/2)::numeric as c1,
+          array_agg(g::numeric) as c2,
+           count(*) as c3
+    from generate_series(0, 1999) g
+    where g < r.a
+    group by g/2) as s;
 
 set jit_above_cost to default;
 

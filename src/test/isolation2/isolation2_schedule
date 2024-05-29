@@ -8,12 +8,17 @@ test: checkpoint_dtx_info
 test: autovacuum-analyze
 test: vacuum_skip_locked_onseg
 test: lockmodes
+test: log_directory
 test: pg_rewind_fail_missing_xlog
 test: prepared_xact_deadlock_pg_rewind
 test: ao_partition_lock
+test: concurrent_partition_table_operations_should_not_deadlock
 
 test: select_dropped_table
 test: update_hash_col_utilitymode execute_on_utilitymode
+
+# Test to check root stats updation
+test: merge_root_stats
 
 # Tests for crash recovery
 test: uao_crash_compaction_column
@@ -38,6 +43,7 @@ test: insert_root_partition_truncate_deadlock_without_gdd
 test: gdd/prepare
 test: gdd/insert_root_partition_truncate_deadlock
 test: gdd/concurrent_update
+test: gdd/concurrent_insert_on_conflict
 test: gdd/dist-deadlock-01 gdd/dist-deadlock-04 gdd/dist-deadlock-05 gdd/dist-deadlock-06 gdd/dist-deadlock-07 gdd/dist-deadlock-102 gdd/dist-deadlock-103 gdd/dist-deadlock-104 gdd/dist-deadlock-106 gdd/non-lock-105
 test: gdd/dist-deadlock-upsert
 # until we can improve below flaky case please keep it disabled
@@ -67,6 +73,7 @@ test: misc
 
 test: starve_case pg_views_concurrent_drop alter_blocks_for_update_and_viceversa drop_rename reader_waits_for_lock bitmap_index_ao_sparse
 
+test: create_index_deadlock
 
 # below test(s) inject faults so each of them need to be in a separate group
 test: pg_terminate_backend
@@ -87,14 +94,14 @@ test: distributedlog-bug
 test: invalidated_toast_index
 test: distributed_snapshot
 test: gp_collation
-test: ao_blkdir
 test: bitmap_index_concurrent
 test: bitmap_index_crash
 test: bitmap_update_words_backup_block
 test: bitmap_index_inspect
 
-# below test utilizes fault injectors so it needs to be in a group by itself
+# below tests utilize fault injectors so it needs to be in a group by itself
 test: external_table
+test: pqsignal
 
 test: fsync_ao
 
@@ -104,6 +111,7 @@ test: disable_autovacuum
 # Tests on Append-Optimized tables (row-oriented).
 test: concurrent_index_creation_should_not_deadlock
 test: uao/alter_while_vacuum_row uao/alter_while_vacuum2_row
+test: uao/alter_table_row
 test: uao/brin_row
 test: uao/compaction_full_stats_row
 test: uao/compaction_utility_row
@@ -114,7 +122,7 @@ test: uao/cursor_before_update_row
 test: uao/cursor_withhold_row
 test: uao/cursor_withhold2_row
 test: uao/delete_while_vacuum_row
-test: uao/index_build_reltuples_row
+test: uao/index_build_relstats_row
 test: uao/index_only_scan_row
 test: uao/insert_policy_row
 test: uao/insert_while_vacuum_row
@@ -143,6 +151,7 @@ test: uao/selectinsert_while_vacuum_row
 test: uao/selectinsertupdate_while_vacuum_row
 test: uao/selectupdate_while_vacuum_row
 test: uao/snapshot_index_corruption_row
+test: uao/tablesample_row
 test: uao/update_while_vacuum_row
 test: uao/vacuum_self_serializable_row
 test: uao/vacuum_self_serializable2_row
@@ -161,13 +170,16 @@ test: uao/cluster_progress_row
 # test: uao/bad_buffer_on_temp_ao_row
 # check storage-dependent collected statistics views
 test: uao/collected_stats_views_row
+test: uao/fast_analyze_row
 
 test: reorganize_after_ao_vacuum_skip_drop truncate_after_ao_vacuum_skip_drop mark_all_aoseg_await_drop
 # below test(s) inject faults so each of them need to be in a separate group
 test: segwalrep/coordinator_wal_switch
 
 # Tests on Append-Optimized tables (column-oriented).
+test: aoco_column_rewrite
 test: uao/alter_while_vacuum_column uao/alter_while_vacuum2_column
+test: uao/alter_table_column
 test: uao/brin_column
 test: uao/compaction_full_stats_column
 test: uao/compaction_utility_column
@@ -178,7 +190,7 @@ test: uao/cursor_before_update_column
 test: uao/cursor_withhold_column
 test: uao/cursor_withhold2_column
 test: uao/delete_while_vacuum_column
-test: uao/index_build_reltuples_column
+test: uao/index_build_relstats_column
 test: uao/index_only_scan_column
 test: uao/insert_policy_column
 test: uao/insert_while_vacuum_column
@@ -207,6 +219,7 @@ test: uao/selectinsert_while_vacuum_column
 test: uao/selectinsertupdate_while_vacuum_column
 test: uao/selectupdate_while_vacuum_column
 test: uao/snapshot_index_corruption_column
+test: uao/tablesample_column
 test: uao/update_while_vacuum_column
 test: uao/vacuum_self_serializable_column
 test: uao/vacuum_self_serializable2_column
@@ -225,6 +238,9 @@ test: uao/cluster_progress_column
 # test: uao/bad_buffer_on_temp_ao_column
 # check storage-dependent collected statistics views
 test: uao/collected_stats_views_column
+test: uao/fast_analyze_column
+test: ao_blkdir
+test: ao_partial_scan
 
 # this case contains fault injection, must be put in a separate test group
 test: terminate_in_gang_creation
@@ -240,15 +256,24 @@ test: pg_basebackup_large_database_oid
 test: basebackup_progress
 test: vacuum_progress_row
 test: vacuum_progress_column
+
+test: ao_relation_size
+test: analyze_progress
+test: appendonly_analyze_progress
+test: aoco_analyze_progress
+test: ao_index_build_progress
+test: autostats_locking
+
+# this test contains some fault injection that might get mis-hit by autovacuum process,
+# so it needs to be run with autovacuum being disabled
+test: segwalrep/die_commit_pending_replication
+
 test: enable_autovacuum
 test: idle_gang_cleaner
 # test idle_in_transaction_session_timeout
+test: autovacuum-temp-table
 
-test: ao_index_build_progress
-test: analyze_progress
 test: copy_progress
-
-test: segwalrep/die_commit_pending_replication
 
 # Tests for FTS
 test: fts_errors
@@ -264,10 +289,11 @@ test: segwalrep/dtm_recovery_on_standby
 test: segwalrep/commit_blocking_on_standby
 test: segwalrep/max_slot_wal_keep_size
 test: segwalrep/dtx_recovery_wait_lsn
-test: segwalrep/select_throttle
+test: segwalrep/hintbit_throttle
 test: fts_manual_probe
 test: fts_session_reset
 test: fts_segment_reset
+test: fts_doublefault
 
 # Reindex tests
 test: reindex/abort_reindex
@@ -339,3 +365,9 @@ test: uao/ao_unique_index_vacuum_column
 test: free_remapper_fatal
 
 test: spilling_hashagg
+
+# test for heap tables with concurrency for BRIN
+test: brin_heap
+
+# Intensive tests for BRIN
+test: uao/brin_chain_row uao/brin_chain_column

@@ -79,7 +79,6 @@ DIRNAME=`findCmdInPath dirname`
 ECHO=`findCmdInPath echo`
 FIND=`findCmdInPath find`
 GREP=`findCmdInPath grep`
-EGREP=`findCmdInPath egrep`
 HEAD=`findCmdInPath head`
 HOSTNAME=`findCmdInPath hostname`
 IP=`findCmdInPath ip`
@@ -221,6 +220,9 @@ LOG_MSG () {
 		level=${1%%]*}
 		case "$level" in
 		*FATAL*)
+			EXIT_STATUS=1
+			;;
+	        *ERROR*)
 			EXIT_STATUS=1
 			;;
 		esac

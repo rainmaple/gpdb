@@ -542,16 +542,14 @@ create table co6(
 	a int encoding (compresstype=rle_type),
 	b float encoding (blocksize=8192))
 	distributed by (a);
-ERROR:  compresslevel=5 is out of range for rle_type (should be in the range 1 to 4)
 create table co7(a int, b float,
 	default column encoding (compresstype=RLE_TYPE, compresslevel=7))
 	distributed by (a);
-ERROR:  compresslevel=7 is out of range for rle_type (should be in the range 1 to 4)
+ERROR:  compresslevel=7 is out of range for rle_type (should be in the range 1 to 6)
 -- negative tests - session level set
 set gp_default_storage_options = "compresstype=zlib,compresslevel=11";
 ERROR:  compresslevel=11 is out of range for zlib (should be in the range 1 to 9)
 set gp_default_storage_options = "compresslevel=5,compresstype=RLE_TYPE";
-ERROR:  compresslevel=5 is out of range for rle_type (should be in the range 1 to 4)
 set gp_default_storage_options = "compresslevel=1,compresstype=rle";
 ERROR:  unknown compresstype "rle"
 set gp_default_storage_options = "checksum=1234";
@@ -561,9 +559,9 @@ ERROR:  invalid integer value "true" for storage option "blocksize"
 set gp_default_storage_options = 'blocksize=8192,checksumblah=true';
 ERROR:  invalid storage option "checksumblah"
 show gp_default_storage_options;
-                   gp_default_storage_options                    
------------------------------------------------------------------
- blocksize=32768,compresstype=zlib,compresslevel=5,checksum=true
+                     gp_default_storage_options                      
+---------------------------------------------------------------------
+ blocksize=32768,compresstype=rle_type,compresslevel=5,checksum=true
 (1 row)
 
 -- negative tests - database level
@@ -869,7 +867,7 @@ create external table ext_t1 (a int, b int)
 --------+---------+-----------+----------+---------+-------------+---------+--------------+-------------
  a      | integer |           |          |         |             | plain   |              | 
  b      | integer |           |          |         |             | plain   |              | 
-FDW options: (format 'text', delimiter '	', "null" E'\\N', escape E'\\', format_type 't', location_uris 'file:///tmp/test.txt', execute_on 'ALL_SEGMENTS', log_errors 'f', encoding '6', is_writable 'false')
+FDW options: (format 'text', delimiter '	', "null" E'\\N', escape E'\\', location_uris 'file:///tmp/test.txt', execute_on 'ALL_SEGMENTS', log_errors 'disable', encoding 'UTF8', is_writable 'false')
 
 SELECT am.amname FROM pg_class c LEFT JOIN pg_am am ON (c.relam = am.oid) WHERE c.relname = 'ext_t1';
  amname 
@@ -886,7 +884,7 @@ create external table ext_error_logging_off (a int, b int)
 --------+---------+-----------+----------+---------+-------------+---------+--------------+-------------
  a      | integer |           |          |         |             | plain   |              | 
  b      | integer |           |          |         |             | plain   |              | 
-FDW options: (format 'text', delimiter '	', "null" E'\\N', escape E'\\', format_type 't', location_uris 'file:///tmp/test.txt', execute_on 'ALL_SEGMENTS', reject_limit '100', reject_limit_type 'r', log_errors 'f', encoding '6', is_writable 'false')
+FDW options: (format 'text', delimiter '	', "null" E'\\N', escape E'\\', location_uris 'file:///tmp/test.txt', execute_on 'ALL_SEGMENTS', reject_limit '100', reject_limit_type 'rows', log_errors 'disable', encoding 'UTF8', is_writable 'false')
 
 SELECT am.amname FROM pg_class c LEFT JOIN pg_am am ON (c.relam = am.oid) WHERE c.relname = 'ext_error_logging_off';
  amname 
@@ -903,7 +901,7 @@ create external table ext_t2 (a int, b int)
 --------+---------+-----------+----------+---------+-------------+---------+--------------+-------------
  a      | integer |           |          |         |             | plain   |              | 
  b      | integer |           |          |         |             | plain   |              | 
-FDW options: (format 'text', delimiter '	', "null" E'\\N', escape E'\\', format_type 't', location_uris 'file:///tmp/test.txt', execute_on 'ALL_SEGMENTS', reject_limit '100', reject_limit_type 'r', log_errors 't', encoding '6', is_writable 'false')
+FDW options: (format 'text', delimiter '	', "null" E'\\N', escape E'\\', location_uris 'file:///tmp/test.txt', execute_on 'ALL_SEGMENTS', reject_limit '100', reject_limit_type 'rows', log_errors 'enable', encoding 'UTF8', is_writable 'false')
 
 SELECT am.amname FROM pg_class c LEFT JOIN pg_am am ON (c.relam = am.oid) WHERE c.relname = 'ext_t2';
  amname 
@@ -920,7 +918,7 @@ create external table ext_t3 (a int, b int)
 --------+---------+-----------+----------+---------+-------------+---------+--------------+-------------
  a      | integer |           |          |         |             | plain   |              | 
  b      | integer |           |          |         |             | plain   |              | 
-FDW options: (format 'text', delimiter '	', "null" E'\\N', escape E'\\', format_type 't', location_uris 'file:///tmp/test.txt', execute_on 'ALL_SEGMENTS', reject_limit '100', reject_limit_type 'r', log_errors 'p', encoding '6', is_writable 'false')
+FDW options: (format 'text', delimiter '	', "null" E'\\N', escape E'\\', location_uris 'file:///tmp/test.txt', execute_on 'ALL_SEGMENTS', reject_limit '100', reject_limit_type 'rows', log_errors 'persistently', encoding 'UTF8', is_writable 'false')
 
 SELECT am.amname FROM pg_class c LEFT JOIN pg_am am ON (c.relam = am.oid) WHERE c.relname = 'ext_t3';
  amname 

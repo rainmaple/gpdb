@@ -1,6 +1,13 @@
 --
 -- Set up
 --
+-- start_matchsubs
+-- m/\(cost=.*\)/
+-- s/\(cost=.*\)//
+--
+-- m/\(slice\d+; segments: \d+\)/
+-- s/\(slice\d+; segments: \d+\)//
+-- end_matchsubs
 create schema bfv_joins;
 set search_path='bfv_joins';
 
@@ -428,6 +435,60 @@ explain select * from o1 left join o2 on a1 = a2 left join o3 on a2 is not disti
 explain select * from o1 left join o2 on a1 = a2 left join o3 on a2 is not distinct from a3 and b2 is distinct from b3;
 explain select * from o1 left join o2 on a1 = a2 left join o3 on a2 is not distinct from a3 and b2 = b3;
 
+-- Test hashed distribution spec derived from a self join
+truncate o1;
+truncate o2;
+
+insert into o1 select i, i from generate_series(1,9) i;
+insert into o1 values (NULL, NULL);
+insert into o2 select i, NULL from generate_series(11,100) i;
+insert into o2 values (NULL, NULL);
+
+analyze o1;
+analyze o2;
+
+-- Self join maintains the distribution keys from both children (i.e. the join
+-- result produces a combine hash distribution spec)
+--
+-- Expect no redistribute under the joins
+explain select t2.b1 from (select distinct a1 from o1) t1
+left outer join (select a1, b1 from o1) t2 on t1.a1 = t2.a1
+left outer join o1 t3 on t2.a1 = t3.a1
+left outer join o1 t4 on t2.a1 = t4.a1;
+select t2.b1 from (select distinct a1 from o1) t1
+left outer join (select a1, b1 from o1) t2 on t1.a1 = t2.a1
+left outer join o1 t3 on t2.a1 = t3.a1
+left outer join o1 t4 on t2.a1 = t4.a1;
+
+-- Self join maintains the distribution keys from both children (i.e. the join
+-- result produces a combine hash distribution spec)
+--
+-- Expect no redistribute under the joins
+explain (costs off) select t2.b1 from o1 t3
+right outer join (select a1, b1 from o1) t2 on t2.a1 = t3.a1
+right outer join o1 t4 on t2.a1 = t4.a1
+right outer join (select distinct a1 from o1) t1 on t1.a1 = t2.a1;
+select t2.b1 from o1 t3
+right outer join (select a1, b1 from o1) t2 on t2.a1 = t3.a1
+right outer join o1 t4 on t2.a1 = t4.a1
+right outer join (select distinct a1 from o1) t1 on t1.a1 = t2.a1;
+
+-- Self join, but the projected distribution key value is changed
+--
+-- Expect redistribute under the joins
+explain select t2.b1 from (select distinct a1+1 as a1 from o1) t1
+left outer join o1 t2 on t2.a1 = t1.a1;
+select t2.b1 from (select distinct a1+1 as a1 from o1) t1
+left outer join o1 t2 on t2.a1 = t1.a1;
+
+-- Self join, but the joined distribution key value is changed
+--
+-- Expect redistribute under the joins
+explain select t2.b1 from (select distinct a1 from o1) t1
+left outer join o1 t2 on t2.a1 = t1.a1+1;
+select t2.b1 from (select distinct a1 from o1) t1
+left outer join o1 t2 on t2.a1 = t1.a1+1;
+
 -- Test case from community Github PR 13722
 create table t_13722(id int, tt timestamp)
   distributed by (id);
@@ -496,6 +557,53 @@ explain select varchar_3, char_3, text_any from foo join bar on varchar_3=char_3
 join baz on varchar_3=text_any;
 select varchar_3, char_3, text_any from foo join bar on varchar_3=char_3
 join baz on varchar_3=text_any;
+
+--
+-- Test case for Hash Join rescan after squelched without hashtable built
+-- See https://github.com/greenplum-db/gpdb/pull/15590
+--
+--- Lateral Join
+set from_collapse_limit = 1;
+set join_collapse_limit = 1;
+select 1 from pg_namespace  join lateral
+    (select * from aclexplode(nspacl) x join pg_authid  on x.grantee = pg_authid.oid where rolname = current_user) z on true limit 1;
+reset from_collapse_limit;
+reset join_collapse_limit;
+
+--- NestLoop index join
+create table l_table (a int,  b int) distributed replicated;
+create index l_table_idx on l_table(a);
+create table r_table1 (ra1 int,  rb1 int) distributed replicated;
+create table r_table2 (ra2 int,  rb2 int) distributed replicated;
+insert into l_table select i % 10 , i from generate_series(1, 10000) i;
+insert into r_table1 select i, i from generate_series(1, 1000) i;
+insert into r_table2 values(11, 11), (1, 1) ;
+analyze l_table;
+analyze r_table1;
+analyze r_table2;
+
+set optimizer to off;
+set enable_nestloop to on;
+set enable_bitmapscan to off;
+explain select * from r_table2 where ra2 in ( select a from l_table join r_table1 on b = rb1);
+select * from r_table2 where ra2 in ( select a from l_table join r_table1 on b = rb1);
+
+reset optimizer;
+reset enable_nestloop;
+reset enable_bitmapscan;
+drop table l_table;
+drop table r_table1;
+drop table r_table2;
+
+-- Should throw an error during planning: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+-- Falls back on GPORCA, but shouldn't cause GPORCA to crash
+CREATE TABLE ext_stats_tbl(c0 name, c2 boolean);
+CREATE STATISTICS IF NOT EXISTS s0 (mcv) ON c2, c0 FROM ext_stats_tbl;
+
+INSERT INTO ext_stats_tbl VALUES('tC', true);
+ANALYZE ext_stats_tbl;
+
+explain SELECT 1 FROM ext_stats_tbl t11 FULL JOIN ext_stats_tbl t12 ON t12.c2;
 
 -- Clean up. None of the objects we create are very interesting to keep around.
 reset search_path;

@@ -1238,7 +1238,7 @@ initialize_environment(void)
 		 * won't mess things up.)  Also, set PGPORT to the temp port, and set
 		 * PGHOST depending on whether we are using TCP or Unix sockets.
 		 *
-		 * This list should be kept in sync with TestLib.pm.
+		 * This list should be kept in sync with PostgreSQL/Test/Utils.pm.
 		 */
 		/* PGCLIENTENCODING, see above */
 		unsetenv("PGCONNECT_TIMEOUT");
@@ -2614,7 +2614,19 @@ create_database(const char *dbname)
 	/*
 	 * Install any requested extensions.  We use CREATE IF NOT EXISTS so that
 	 * this will work whether or not the extension is preinstalled.
+	 *
+	 * Starting GPDB 7X, gp_toolkit is made an extension. In order to minimize impact
+	 * we decided to still pre-bake it into template1 and postgres. But template0
+	 * should be as vanilla as possible so we do not install it there. Regress test
+	 * is a rare case where template0 is used instead of template1 while gp_toolkit is
+	 * relied heavily. So let's just load gp_toolkit here.
 	 */
+	add_stringlist_item(&loadextension, "gp_toolkit");
+	/*
+	 * GPDB: We rely heavily on pageinspect for many tests, especially for BRIN,
+	 * so load it here.
+	 */
+	add_stringlist_item(&loadextension, "pageinspect");
 	for (sl = loadextension; sl != NULL; sl = sl->next)
 	{
 		header(_("installing %s"), sl->str);

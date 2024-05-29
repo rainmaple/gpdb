@@ -6,6 +6,10 @@
 -- start_matchignore
 -- m/ERROR:  workfile compresssion is not supported by this build/
 -- end_matchignore
+-- start_matchsubs
+-- m/\(cost=.*\)/
+-- s/\(cost=.*\)//
+-- end_matchsubs
 
 --
 -- test numeric hash join
@@ -622,34 +626,6 @@ inner join lateral
  from t_mylog_issue_8860 where myid = ml1.myid and log_date > ml1.log_date order by log_date asc limit 1) ml2
 on true;
 
--- test prefetch join qual
--- we do not handle this correct
--- the only case we need to prefetch join qual is:
---   1. outer plan contains motion
---   2. the join qual contains subplan that contains motion
-reset client_min_messages;
-set Test_print_prefetch_joinqual = true;
--- prefetch join qual is only set correct for planner
-set optimizer = off;
-
-create table t1_test_pretch_join_qual(a int, b int, c int);
-create table t2_test_pretch_join_qual(a int, b int, c int);
-
--- the following plan contains redistribute motion in both inner and outer plan
--- the join qual is t1.c > t2.c, it contains no motion, should not prefetch
-explain (costs off) select * from t1_test_pretch_join_qual t1 join t2_test_pretch_join_qual t2
-on t1.b = t2.b and t1.c > t2.c;
-
-create table t3_test_pretch_join_qual(a int, b int, c int);
-
--- the following plan contains motion in both outer plan and join qual,
--- so we should prefetch join qual
-explain (costs off) select * from t1_test_pretch_join_qual t1 join t2_test_pretch_join_qual t2
-on t1.b = t2.b and t1.a > any (select sum(b) from t3_test_pretch_join_qual t3 where c > t2.a);
-
-reset Test_print_prefetch_joinqual;
-reset optimizer;
-
 -- Github Issue: https://github.com/greenplum-db/gpdb/issues/9733
 -- Previously in the function bring_to_outer_query and
 -- bring_to_singleQE it depends on the path->param_info field
@@ -857,6 +833,172 @@ explain select fooJoinPruning.* from fooJoinPruning left join barJoinPruning on 
 drop table fooJoinPruning;
 drop table barJoinPruning;
 
+--
+-- Cases where join under union
+--
+create table foo(a int primary key, b int,c int);
+create table bar(a int primary key, b int,c int);
+insert into foo values (1,1,10),(2,1,10),(3,2,20),(4,2,30),(5,2,30),(6,NULL,NULL),(7,NULL,3);
+insert into bar values (1,1,10),(2,2,20),(3,NULL,NULL),(4,3,NULL),(5,1,10);
+analyze foo,bar;
+
+explain (costs off) select foo.a, bar.b from foo left join bar on foo.a = bar.a
+union select foo.a, bar.b from foo join bar on foo.a = bar.a;
+
+-------------------------------------
+-- CASES WHERE JOIN WILL BE PRUNED --
+-------------------------------------
+
+--------------------------------------------------------------------------------
+-- join under UNION
+-- For the below query the output columns of both the CLogicalLeftOuterJoin
+-- are from the outer relation, so we can prune both the joins
+--------------------------------------------------------------------------------
+explain (costs off) select foo.b,foo.c from foo left join bar on foo.a=bar.a union
+select bar.b,bar.c from bar left join foo on foo.a=bar.a;
+
+select foo.b,foo.c from foo left join bar on foo.a=bar.a union
+select bar.b,bar.c from bar left join foo on foo.a=bar.a;
+
+--------------------------------------------------------------------------------
+-- join under UNION ALL
+-- For the below query the output columns of both the CLogicalLeftOuterJoin
+-- are from the outer relation, so we can prune both the joins
+--------------------------------------------------------------------------------
+explain (costs off) select foo.b,foo.c from foo left join bar on foo.a=bar.a union all
+select bar.b,bar.c from bar left join foo on foo.a=bar.a;
+
+select foo.b,foo.c from foo left join bar on foo.a=bar.a union all
+select bar.b,bar.c from bar left join foo on foo.a=bar.a;
+
+--------------------------------------------------------------------------------
+-- join under INTERSECT
+-- For the below query the output columns of both the CLogicalLeftOuterJoin
+-- are from the outer relation, so we can prune both the joins
+--------------------------------------------------------------------------------
+explain (costs off) select foo.b,foo.c from foo left join bar on foo.a=bar.a intersect
+select bar.b,bar.c from bar left join foo on foo.a=bar.a;
+
+select foo.b,foo.c from foo left join bar on foo.a=bar.a intersect
+select bar.b,bar.c from bar left join foo on foo.a=bar.a;
+
+--------------------------------------------------------------------------------
+-- join under INTERSECT ALL
+-- For the below query the output columns of both the CLogicalLeftOuterJoin
+-- are from the outer relation, so we can prune both the joins
+--------------------------------------------------------------------------------
+explain (costs off) select foo.b,foo.c from foo left join bar on foo.a=bar.a intersect all
+select bar.b,bar.c from bar left join foo on foo.a=bar.a;
+
+select foo.b,foo.c from foo left join bar on foo.a=bar.a intersect all
+select bar.b,bar.c from bar left join foo on foo.a=bar.a;
+
+--------------------------------------------------------------------------------
+-- join under EXCEPT
+-- For the below query the output columns of both the CLogicalLeftOuterJoin
+-- are from the outer relation, so we can prune both the joins
+--------------------------------------------------------------------------------
+explain (costs off) select foo.b,foo.c from foo left join bar on foo.a=bar.a except
+select bar.b,bar.c from bar left join foo on foo.a=bar.a;
+
+select foo.b,foo.c from foo left join bar on foo.a=bar.a except
+select bar.b,bar.c from bar left join foo on foo.a=bar.a;
+
+--------------------------------------------------------------------------------
+-- join under EXCEPT ALL
+-- For the below query the output columns of both the CLogicalLeftOuterJoin
+-- are from the outer relation, so we can prune both the joins
+--------------------------------------------------------------------------------
+explain (costs off) select foo.b,foo.c from foo left join bar on foo.a=bar.a except all
+select bar.b,bar.c from bar left join foo on foo.a=bar.a;
+
+select foo.b,foo.c from foo left join bar on foo.a=bar.a except all
+select bar.b,bar.c from bar left join foo on foo.a=bar.a;
+
+------------------------------------------
+-- CASES WHERE JOIN WILL NOT BE PRUNED --
+------------------------------------------
+
+--------------------------------------------------------------------------------
+-- join under UNION
+-- For the below query since for the outer CLogicalLeftOuterJoin, all the output
+-- columns are from the outer relation, the outer join can be pruned but for the
+-- inner CLogicalLeftOuterJoin the output column contains columns from
+-- inner relation.So the inner join can't be pruned.
+--------------------------------------------------------------------------------
+explain (costs off) select foo.b,foo.c from foo left join bar on foo.a=bar.a union
+select bar.b,foo.c from bar left join foo on foo.a=bar.a;
+
+select foo.b,foo.c from foo left join bar on foo.a=bar.a union
+select bar.b,foo.c from bar left join foo on foo.a=bar.a;
+
+--------------------------------------------------------------------------------
+-- join under UNION ALL
+-- For the below query since for the outer CLogicalLeftOuterJoin, all the output
+-- columns are from the outer relation, the outer join can be pruned but for the
+-- inner CLogicalLeftOuterJoin the output column contains columns from
+-- inner relation.So the inner join can't be pruned.
+--------------------------------------------------------------------------------
+explain (costs off) select foo.b,foo.c from foo left join bar on foo.a=bar.a union all
+select bar.b,foo.c from bar left join foo on foo.a=bar.a;
+
+select foo.b,foo.c from foo left join bar on foo.a=bar.a union all
+select bar.b,foo.c from bar left join foo on foo.a=bar.a;
+
+--------------------------------------------------------------------------------
+-- join under INTERSECT
+-- For the below query since for the outer CLogicalLeftOuterJoin, all the output
+-- columns are from the outer relation, the outer join can be pruned but for the
+-- inner CLogicalLeftOuterJoin the output column contains columns from
+-- inner relation.So the inner join can't be pruned.
+--------------------------------------------------------------------------------
+explain (costs off) select foo.b,foo.c from foo left join bar on foo.a=bar.a intersect
+select bar.b,foo.c from bar left join foo on foo.a=bar.a;
+
+select foo.b,foo.c from foo left join bar on foo.a=bar.a intersect
+select bar.b,foo.c from bar left join foo on foo.a=bar.a;
+
+--------------------------------------------------------------------------------
+-- join under INTERSECT ALL
+-- For the below query since for the outer CLogicalLeftOuterJoin, all the output
+-- columns are from the outer relation, the outer join can be pruned but for the
+-- inner CLogicalLeftOuterJoin the output column contains columns from
+-- inner relation.So the inner join can't be pruned.
+--------------------------------------------------------------------------------
+explain (costs off) select foo.b,foo.c from foo left join bar on foo.a=bar.a intersect all
+select bar.b,foo.c from bar left join foo on foo.a=bar.a;
+
+select foo.b,foo.c from foo left join bar on foo.a=bar.a intersect all
+select bar.b,foo.c from bar left join foo on foo.a=bar.a;
+
+--------------------------------------------------------------------------------
+-- join under EXCEPT
+-- For the below query since for the outer CLogicalLeftOuterJoin, all the output
+-- columns are from the outer relation, the outer join can be pruned but for the
+-- inner CLogicalLeftOuterJoin the output column contains columns from
+-- inner relation.So the inner join can't be pruned.
+--------------------------------------------------------------------------------
+explain (costs off) select foo.b,foo.c from foo left join bar on foo.a=bar.a except
+select bar.b,foo.c from bar left join foo on foo.a=bar.a;
+
+select foo.b,foo.c from foo left join bar on foo.a=bar.a except
+select bar.b,foo.c from bar left join foo on foo.a=bar.a;
+
+--------------------------------------------------------------------------------
+-- join under EXCEPT ALL
+-- For the below query since for the outer CLogicalLeftOuterJoin, all the output
+-- columns are from the outer relation, the outer join can be pruned but for the
+-- inner CLogicalLeftOuterJoin the output column contains columns from
+-- inner relation.So the inner join can't be pruned.
+--------------------------------------------------------------------------------
+explain (costs off) select foo.b,foo.c from foo left join bar on foo.a=bar.a except all
+select bar.b,foo.c from bar left join foo on foo.a=bar.a;
+
+select foo.b,foo.c from foo left join bar on foo.a=bar.a except all
+select bar.b,foo.c from bar left join foo on foo.a=bar.a;
+
+drop table foo;
+drop table bar;
 -----------------------------------------------------------------
 -- Test cases on Dynamic Partition Elimination(DPE) for Right Joins
 -----------------------------------------------------------------
@@ -966,3 +1108,169 @@ drop table if exists bar_PT2;
 drop table if exists bar_PT3;
 drop table if exists bar_List_PT1;
 drop table if exists bar_List_PT2;
+
+create table foo_varchar (a varchar(5)) distributed by (a);
+create table bar_char (p char(5)) distributed by (p);
+create table random_dis_varchar (x varchar(5)) distributed randomly;
+create table random_dis_char (y char(5)) distributed randomly;
+
+insert into foo_varchar values ('1 '),('2  '),('3   ');
+insert into bar_char values ('1 '),('2  '),('3   ');
+insert into random_dis_varchar values ('1 '),('2  '),('3   ');
+insert into random_dis_char values ('1 '),('2  '),('3   ');
+
+set optimizer_enable_hashjoin to off;
+set enable_hashjoin to off;
+set enable_nestloop to on;
+
+-- check motion is added when performing a NL Left Outer Join between relations
+-- when the join condition columns belong to different opfamily and both are
+-- distribution keys
+explain select * from foo_varchar left join bar_char on foo_varchar.a=bar_char.p;
+select * from foo_varchar left join bar_char on foo_varchar.a=bar_char.p;
+
+-- There is a plan change (from redistribution to broadcast) because a NULL
+-- matching distribution is returned when there is opfamily mismatch between join
+-- columns.
+explain select * from foo_varchar left join random_dis_char on foo_varchar.a=random_dis_char.y;
+select * from foo_varchar left join random_dis_char on foo_varchar.a=random_dis_char.y;
+
+explain select * from bar_char left join random_dis_varchar on bar_char.p=random_dis_varchar.x;
+select * from bar_char left join random_dis_varchar on bar_char.p=random_dis_varchar.x;
+
+-- check motion is added when performing a NL Inner Join between relations when
+-- the join condition columns belong to different opfamily and both are
+-- distribution keys
+explain select * from foo_varchar inner join bar_char on foo_varchar.a=bar_char.p;
+select * from foo_varchar inner join bar_char on foo_varchar.a=bar_char.p;
+
+-- There is a plan change (from redistribution to broadcast) because a NULL
+-- matching distribution is returned when there is opfamily mismatch between join
+-- columns.
+explain select * from foo_varchar inner join random_dis_char on foo_varchar.a=random_dis_char.y;
+select * from foo_varchar inner join random_dis_char on foo_varchar.a=random_dis_char.y;
+
+explain select * from bar_char inner join random_dis_varchar on bar_char.p=random_dis_varchar.x;
+select * from bar_char inner join random_dis_varchar on bar_char.p=random_dis_varchar.x;
+
+drop table foo_varchar;
+drop table bar_char;
+drop table random_dis_varchar;
+drop table random_dis_char;
+
+set optimizer_enable_hashjoin to on;
+reset enable_hashjoin;
+reset enable_nestloop;
+
+-----------------------------------------------------------------
+-- Test cases to check if ORCA generates correct result
+-- for "Left Semi Join with replicated outer table"
+-----------------------------------------------------------------
+drop table if exists repli_t1;
+drop table if exists dist_t1;
+
+create table repli_t1 (a int) distributed replicated;
+insert into repli_t1 values(1);
+analyze repli_t1;
+
+create table dist_t1 (a int , b int) distributed by (a);
+insert into dist_t1 select i, 1 from generate_series(1, 5) i;
+analyze dist_t1;
+
+-- No explicitly defined primary key for replicated table
+---------------------------------------------------------
+
+-- Outer - replicated, Inner - distributed table
+explain (costs off) select * from repli_t1 where exists ( select 1 from dist_t1 where repli_t1.a >= dist_t1.b);
+select * from repli_t1 where exists ( select 1 from dist_t1 where repli_t1.a >= dist_t1.b);
+
+explain (costs off) select * from (select t1.a as aVal1, t2.a as aVal2 from repli_t1 as t1 , repli_t1 as t2 where t1.a = t2.a) as t3
+where exists (select 1 from dist_t1 as t4 where t3.aVal1 >= t4.b);
+select * from (select t1.a as aVal1, t2.a as aVal2 from repli_t1 as t1 , repli_t1 as t2 where t1.a = t2.a) as t3
+where exists (select 1 from dist_t1 as t4 where t3.aVal1 >= t4.b);
+
+create index idx_repl_t1_a ON repli_t1 using btree(a);
+analyze repli_t1;
+explain (costs off) select * from repli_t1 where exists ( select 1 from dist_t1 where repli_t1.a >= dist_t1.b);
+select * from repli_t1 where exists ( select 1 from dist_t1 where repli_t1.a >= dist_t1.b);
+drop index idx_repl_t1_a;
+
+-- Outer - distributed, Inner - replicated table
+explain (costs off) select * from dist_t1 where exists ( select 1 from repli_t1  where repli_t1.a >= dist_t1.b);
+select * from dist_t1 where exists ( select 1 from repli_t1  where repli_t1.a >= dist_t1.b);
+
+-- Both replicated table
+explain (costs off) select * from repli_t1 as t1  where exists ( select 1 from repli_t1 as t2  where t1.a >= t2.a);
+select * from repli_t1 as t1  where exists ( select 1 from repli_t1 as t2  where t1.a >= t2.a);
+
+-- Outer - Universal, Inner - distributed table
+explain (costs off) select * from generate_series(1, 5) univ_t where exists ( select 1 from dist_t1 where univ_t >= dist_t1.b);
+select * from generate_series(1, 5) univ_t where exists ( select 1 from dist_t1 where univ_t >= dist_t1.b);
+
+-- Outer - distributed, Inner - universal table
+explain (costs off) select * from dist_t1 where exists ( select 1 from generate_series(1, 5) univ_t where univ_t >= dist_t1.b);
+select * from dist_t1 where exists ( select 1 from generate_series(1, 5) univ_t where univ_t >= dist_t1.b);
+
+-- Outer - replicated, Inner - universal table
+explain (costs off)select * from repli_t1 where exists ( select 1 from generate_series(1, 5) univ_t where univ_t >= repli_t1.a);
+select * from repli_t1 where exists ( select 1 from generate_series(1, 5) univ_t where univ_t >= repli_t1.a);
+
+-- Outer - universal, Inner - replicated table
+explain (costs off) select * from generate_series(1, 5) univ_t where exists ( select 1 from repli_t1  where univ_t >= repli_t1.a);
+select * from generate_series(1, 5) univ_t where exists ( select 1 from repli_t1  where univ_t >= repli_t1.a);
+
+-- Explicitly defined primary key for replicated table
+---------------------------------------------------------
+drop table if exists repli_t1_pk;
+drop table if exists repli_t2_pk;
+drop table if exists repli_t3_pk;
+drop table if exists repli_t4_pk;
+
+-- Outer - replicated, Inner - distributed table
+
+create table repli_t1_pk (a int, PRIMARY KEY(a)) distributed replicated;
+insert into repli_t1_pk values(1);
+analyze repli_t1_pk;
+
+create table repli_t2_pk (a int, CONSTRAINT key1_t2 PRIMARY KEY(a) ) distributed replicated;
+insert into repli_t2_pk values(1);
+analyze repli_t2_pk;
+
+create table repli_t3_pk (a int,b int, c int, d int, CONSTRAINT key1_t3 UNIQUE (c,d)) distributed replicated;
+insert into repli_t3_pk values(1,2,3,4);
+analyze repli_t3_pk;
+
+create table repli_t4_pk (a int,b int, c int, d int,  CONSTRAINT key1_t4 PRIMARY KEY(a) , CONSTRAINT key2_t4 UNIQUE (c,d)) distributed replicated;
+insert into repli_t4_pk values(1,2,3,4);
+analyze repli_t4_pk;
+
+explain (costs off) select * from repli_t1_pk where exists ( select 1 from dist_t1 where repli_t1_pk.a >= dist_t1.b);
+select * from repli_t1_pk where exists ( select 1 from dist_t1 where repli_t1_pk.a >= dist_t1.b);
+
+create index idx_repli_t1_pk_a ON repli_t1_pk using btree(a);
+analyze repli_t1_pk;
+explain (costs off) select * from repli_t1_pk where exists ( select 1 from dist_t1 where repli_t1_pk.a >= dist_t1.b);
+select * from repli_t1_pk where exists ( select 1 from dist_t1 where repli_t1_pk.a >= dist_t1.b);
+drop index idx_repli_t1_pk_a;
+
+explain (costs off) select * from repli_t2_pk where exists ( select 1 from dist_t1 where repli_t2_pk.a >= dist_t1.b);
+select * from repli_t2_pk where exists ( select 1 from dist_t1 where repli_t2_pk.a >= dist_t1.b);
+
+explain (costs off) select * from repli_t3_pk where exists ( select 1 from dist_t1 where repli_t3_pk.a >= dist_t1.b);
+select * from repli_t3_pk where exists ( select 1 from dist_t1 where repli_t3_pk.a >= dist_t1.b);
+
+explain (costs off) select * from repli_t4_pk where exists ( select 1 from dist_t1 where repli_t4_pk.a >= dist_t1.b);
+select * from repli_t4_pk where exists ( select 1 from dist_t1 where repli_t4_pk.a >= dist_t1.b);
+
+drop table if exists repli_t1;
+drop table if exists dist_t1;
+drop table if exists repli_t1_pk;
+drop table if exists repli_t2_pk;
+drop table if exists repli_t3_pk;
+drop table if exists repli_t4_pk;
+
+-- Test that left-anti-semi-join not-in works with netowrk types
+CREATE TABLE inverse (cidr inet);
+INSERT INTO inverse values ('192.168.100.199');
+explain SELECT 1 FROM inverse WHERE NOT (cidr <<= ANY(SELECT * FROM inverse));
+SELECT 1 FROM inverse WHERE NOT (cidr <<= ANY(SELECT * FROM inverse));

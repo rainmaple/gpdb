@@ -113,7 +113,7 @@ char	   *wal_consistency_checking_string = NULL;
 bool	   *wal_consistency_checking = NULL;
 bool		wal_init_zero = true;
 bool		wal_recycle = true;
-bool		log_checkpoints = false;
+bool		log_checkpoints = true;
 int			sync_method = DEFAULT_SYNC_METHOD;
 int			wal_level = WAL_LEVEL_MINIMAL;
 int			CommitDelay = 0;	/* precommit delay in microseconds */
@@ -123,7 +123,14 @@ bool		track_wal_io_timing = false;
 int			max_slot_wal_keep_size_mb = -1;
 
 /* GPDB specific */
-bool gp_pause_on_restore_point_replay = false;
+char *gp_pause_on_restore_point_replay = "";
+
+/*
+ * GPDB: Have we reached a specific continuous recovery target? We set this to
+ * true if WAL replay has found a restore point matching the GPDB-specific GUC
+ * gp_pause_on_restore_point_replay and a promotion has been requested.
+ */
+static bool reachedContinuousRecoveryTarget = false;
 
 #ifdef WAL_DEBUG
 bool		XLOG_DEBUG = false;
@@ -5901,6 +5908,59 @@ recoveryStopsBefore(XLogReaderState *record)
 }
 
 /*
+ * GPDB: Restore point records can act as a point of synchronization to ensure
+ * cluster-wide consistency during WAL replay. If a restore point is specified
+ * in the gp_pause_on_restore_point_replay GUC, WAL replay will be paused at
+ * that restore point until replay is explicitly resumed.
+ */
+static void
+pauseRecoveryOnRestorePoint(XLogReaderState *record)
+{
+	uint8		info;
+	uint8		rmid;
+
+	/*
+	 * Ignore recovery target settings when not in archive recovery (meaning
+	 * we are in crash recovery).
+	 */
+	if (!ArchiveRecoveryRequested)
+		return;
+
+	info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
+	rmid = XLogRecGetRmid(record);
+
+	if (rmid == RM_XLOG_ID && info == XLOG_RESTORE_POINT)
+	{
+		xl_restore_point *recordRestorePointData;
+
+		recordRestorePointData = (xl_restore_point *) XLogRecGetData(record);
+
+		if (strcmp(recordRestorePointData->rp_name, gp_pause_on_restore_point_replay) == 0)
+		{
+			ereport(LOG,
+					(errmsg("setting recovery pause at restore point \"%s\", time %s",
+							recordRestorePointData->rp_name,
+							timestamptz_to_str(recordRestorePointData->rp_time))));
+
+			SetRecoveryPause(true);
+			recoveryPausesHere();
+
+			/*
+			 * If we've unpaused and there is a promotion request, then we've
+			 * reached our continuous recovery target and need to immediately
+			 * promote. We piggyback on the existing recovery target logic to
+			 * do this. See recoveryStopsAfter().
+			 */
+			if (CheckForStandbyTrigger())
+			{
+				reachedContinuousRecoveryTarget = true;
+				recoveryTargetAction = RECOVERY_TARGET_ACTION_PROMOTE;
+			}
+		}
+	}
+}
+
+/*
  * Same as recoveryStopsBefore, but called after applying the record.
  *
  * We also track the timestamp of the latest applied COMMIT/ABORT
@@ -5927,15 +5987,19 @@ recoveryStopsAfter(XLogReaderState *record)
 	/*
 	 * There can be many restore points that share the same name; we stop at
 	 * the first one.
+	 *
+	 * GPDB: If we've reached the continuous recovery target, we'll use the
+	 * below logic to immediately stop recovery.
 	 */
-	if (recoveryTarget == RECOVERY_TARGET_NAME &&
+	if ((reachedContinuousRecoveryTarget || recoveryTarget == RECOVERY_TARGET_NAME) &&
 		rmid == RM_XLOG_ID && info == XLOG_RESTORE_POINT)
 	{
 		xl_restore_point *recordRestorePointData;
 
 		recordRestorePointData = (xl_restore_point *) XLogRecGetData(record);
 
-		if (strcmp(recordRestorePointData->rp_name, recoveryTargetName) == 0)
+		if (reachedContinuousRecoveryTarget ||
+			strcmp(recordRestorePointData->rp_name, recoveryTargetName) == 0)
 		{
 			recoveryStopAfter = true;
 			recoveryStopXid = InvalidTransactionId;
@@ -6516,7 +6580,7 @@ StartupXLOG(void)
 	XLogCtlInsert *Insert;
 	CheckPoint	checkPoint;
 	bool		wasShutdown;
-	bool		reachedStopPoint = false;
+	bool		reachedRecoveryTarget = false;
 	bool		haveBackupLabel = false;
 	bool		haveTblspcMap = false;
 	XLogRecPtr	RecPtr,
@@ -7299,17 +7363,8 @@ StartupXLOG(void)
 			 */
 			StartupCLOG();
 			StartupSUBTRANS(oldestActiveXID);
-			/*
-			 * Do not initialize DistributedLog subsystem. Hot standby /
-			 * mirror cannot advance distributed xmin because QD does not
-			 * dispatch queries to mirrors.	 To align with upstream, we still
-			 * want a functional hot standby as far as a single primary/mirror
-			 * pair is concerned.  Initializing distributed log subsystem
-			 * affects oldest xmin computation in hot standby, the oldest xmin
-			 * never advances.	Therefore, avoid initializing distributed log
-			 * in hot standby.	If, in future, queries from QD need to be
-			 * dispatched to mirrors, this will have to change.
-			 */
+			DistributedLog_Startup(oldestActiveXID,
+								   XidFromFullTransactionId(ShmemVariableCache->nextFullXid));
 
 			/*
 			 * If we're beginning at a shutdown checkpoint, we know that
@@ -7475,7 +7530,7 @@ StartupXLOG(void)
 				 */
 				if (recoveryStopsBefore(xlogreader))
 				{
-					reachedStopPoint = true;	/* see below */
+					reachedRecoveryTarget = true;
 					break;
 				}
 
@@ -7652,10 +7707,13 @@ StartupXLOG(void)
 						WalSndWakeup();
 				}
 
+				if (gp_pause_on_restore_point_replay)
+					pauseRecoveryOnRestorePoint(xlogreader);
+
 				/* Exit loop if we reached inclusive recovery target */
 				if (recoveryStopsAfter(xlogreader))
 				{
-					reachedStopPoint = true;
+					reachedRecoveryTarget = true;
 					break;
 				}
 
@@ -7667,7 +7725,7 @@ StartupXLOG(void)
 			 * end of main redo apply loop
 			 */
 
-			if (reachedStopPoint)
+			if (reachedRecoveryTarget)
 			{
 				if (!reachedConsistency)
 					ereport(FATAL,
@@ -7724,7 +7782,18 @@ StartupXLOG(void)
 			/* there are no WAL records following the checkpoint */
 			ereport(LOG,
 					(errmsg("redo is not required")));
+
 		}
+
+		/*
+		 * This check is intentionally after the above log messages that
+		 * indicate how far recovery went.
+		 */
+		if (ArchiveRecoveryRequested &&
+			recoveryTarget != RECOVERY_TARGET_UNSET &&
+			!reachedRecoveryTarget)
+			ereport(FATAL,
+					(errmsg("recovery ended before configured recovery target was reached")));
 	}
 
 	/*
@@ -8152,6 +8221,8 @@ StartupXLOG(void)
 	 */
 	InRecovery = false;
 
+	SIMPLE_FAULT_INJECTOR("out_of_recovery_in_startupxlog");
+
 	/*
 	 * If we are a standby with contentid -1 and undergoing promotion,
 	 * update ourselves as the new coordinator in catalog.  This does not
@@ -8260,6 +8331,37 @@ StartupXLOG(void)
 	 */
 	if (standbyState != STANDBY_DISABLED)
 		ShutdownRecoveryTransactionEnvironment();
+
+	/*
+	 * GPDB: A timeline history file is only marked as ready for archival if
+	 * WAL archiving was already enabled when a new timeline id is created
+	 * during promotion.  Thus it's possible to get into a state where the
+	 * timeline history file is not archived yet due to WAL archiving being
+	 * disabled during the timeline switch.  As such, we need to guarantee
+	 * that the current timeline history file is archived.  This will make
+	 * sure downstream operations that require the timeline history file
+	 * succeed (e.g. creating a standby with recovery_target_timeline
+	 * explicitly set to the control file's timeline id or when creating a
+	 * streaming replication standby).  Skip if the current timeline ID is 1
+	 * since there's no timeline history file for it.
+	 */
+	if (XLogArchivingActive() && ThisTimeLineID > 1)
+	{
+		char		histfname[MAXFNAMELEN];
+
+		TLHistoryFileName(histfname, ThisTimeLineID);
+
+		/*
+		 * Timeline history .done files do not get removed automatically so
+		 * this check should be valid to make sure we don't archive the
+		 * timeline history file again on restart.  However, if the timeline
+		 * history .done file was manually removed for some reason, then we
+		 * make the assumption that the archive_command is set up properly to
+		 * gracefully handle the re-archiving attempt.
+		 */
+		if (!XLogArchiveIsReadyOrDone(histfname))
+			XLogArchiveNotify(histfname);
+	}
 
 	/*
 	 * If there were cascading standby servers connected to us, nudge any wal
@@ -8749,8 +8851,13 @@ ReadCheckpointRecord(XLogReaderState *xlogreader, XLogRecPtr RecPtr,
 	 * We should be wary of conflating "report" parameter.  It is currently
 	 * always true when we want to process the extended checkpoint record.
 	 * For now this seems fine as it avoids a diff with postgres.
+	 *
+	 * The coordinator may execute write DTX during gpexpand, so the newly
+	 * added segment may contain DTX info in checkpoint XLOG. However, this step
+	 * is useless and should be avoided for segments, or fatal may be thrown since
+	 * max_tm_gxacts is 0 in segments.
 	 */
-	if (report)
+	if (report && IS_QUERY_DISPATCHER())
 	{
 		CheckpointExtendedRecord ckptExtended;
 		UnpackCheckPointRecord(xlogreader, &ckptExtended);
@@ -9495,7 +9602,25 @@ CreateCheckPoint(int flags)
 	 * recovery we don't need to write running xact data.
 	 */
 	if (!shutdown && XLogStandbyInfoActive())
+	{
 		LogStandbySnapshot();
+
+		if (IS_QUERY_DISPATCHER())
+		{
+			/*
+			 * GPDB: write latestCompletedGxid too, because the standby needs this 
+			 * value for creating distributed snapshot. The standby cannot rely on
+			 * the nextGxid value to set latestCompletedGxid during restart (which 
+			 * the primary does) because nextGxid was bumped in the checkpoint.
+			 */
+			LWLockAcquire(ProcArrayLock, LW_SHARED);
+			DistributedTransactionId lcgxid = ShmemVariableCache->latestCompletedGxid;
+			LWLockRelease(ProcArrayLock);
+			XLogBeginInsert();
+			XLogRegisterData((char *) (&lcgxid), sizeof(lcgxid));
+			recptr = XLogInsert(RM_XLOG_ID, XLOG_LATESTCOMPLETED_GXID);
+		}
+	}
 
 	SIMPLE_FAULT_INJECTOR("checkpoint_after_redo_calculated");
 
@@ -10585,6 +10710,23 @@ xlog_redo(XLogReaderState *record)
 		ShmemVariableCache->GxidCount = 0;
 		SpinLockRelease(shmGxidGenLock);
 	}
+	else if (info == XLOG_LATESTCOMPLETED_GXID)
+	{
+		/*
+		 * This record is only logged by coordinator. But the segment in 
+		 * some situation might see it too (e.g. gpexpand), but segment
+		 * doesn't need to update latestCompletedGxid.
+		 */
+		if (IS_QUERY_DISPATCHER())
+		{
+			DistributedTransactionId gxid;
+
+			gxid = *((DistributedTransactionId *) XLogRecGetData(record));
+			LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+			ShmemVariableCache->latestCompletedGxid = gxid;
+			LWLockRelease(ProcArrayLock);
+		}
+	}
 	else if (info == XLOG_NEXTRELFILENODE)
 	{
 		Oid			nextRelfilenode;
@@ -10799,14 +10941,7 @@ xlog_redo(XLogReaderState *record)
 	}
 	else if (info == XLOG_RESTORE_POINT)
 	{
-		/*
-		 * GPDB: Restore point records can act as a point of
-		 * synchronization to ensure cluster-wide consistency during WAL
-		 * replay. WAL replay is paused at each restore point until it is
-		 * explicitly resumed.
-		 */
-		if (gp_pause_on_restore_point_replay)
-			SetRecoveryPause(true);
+		/* nothing to do here */
 	}
 	else if (info == XLOG_FPI || info == XLOG_FPI_FOR_HINT)
 	{
@@ -13500,10 +13635,11 @@ initialize_wal_bytes_written(void)
  * WAL generation and move at sustained speed with network and mirrors.
  *
  * NB: This function should never be called from inside a critical section,
- * meaning caller should never have MyPgXact->delayChkpt set to true. Otherwise,
- * if mirror is down, we will end up in a deadlock situation between the primary
- * and the checkpointer process, because if MyPgXact->delayChkpt is set,
- * checkpointer cannot proceed to unset WalSndCtl->sync_standbys_defined.
+ * meaning caller should never have MyPgXact->delayChkpt set to true, or
+ * holding an exclusive buffer lock. Otherwise, if mirror is down, we will end
+ * up in a deadlock situation between the primary and the checkpointer process,
+ * because if MyPgXact->delayChkpt is set, checkpointer cannot proceed to unset
+ * WalSndCtl->sync_standbys_defined.
  */
 void
 wait_to_avoid_large_repl_lag(void)

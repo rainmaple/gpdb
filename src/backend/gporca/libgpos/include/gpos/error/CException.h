@@ -131,8 +131,8 @@ public:
 		// unknown exception
 		ExmiUnhandled,
 
-		// illegal byte sequence
-		ExmiIllegalByteSequence,
+		// ORCA in an invalid state
+		ExmiORCAInvalidState,
 
 		ExmiSentinel
 	};

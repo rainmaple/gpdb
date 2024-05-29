@@ -30,6 +30,7 @@
 #include "gpopt/operators/CScalarCmp.h"
 #include "gpopt/operators/CScalarFunc.h"
 #include "gpopt/operators/CScalarIdent.h"
+#include "gpopt/operators/CScalarNullTest.h"
 #include "naucrates/dxl/gpdb_types.h"
 #include "naucrates/md/CMDArrayCoerceCastGPDB.h"
 #include "naucrates/md/CMDIdGPDB.h"
@@ -1294,6 +1295,29 @@ CPredicateUtils::FCompareIdentToConstArray(CExpression *pexpr)
 	return CUtils::FScalarConstArray(pexprArray);
 }
 
+// is the given ScalarArrayCmp a valid index qual
+BOOL
+CPredicateUtils::IsScalarArrayCmpValidIndexQual(CExpression *pexpr,
+												CColRefArray *pdrgpcrIndex)
+{
+	GPOS_ASSERT(nullptr != pexpr);
+	CColRef *pcrFirstIndexKey = (*pdrgpcrIndex)[0];
+	CExpression *pexprScalar = (*pexpr)[0];
+
+	// returns true if ScalarArrayCmp Ident is the first index key col id.
+	// A ScalarArrayCmp is a valid index clause only if it's on the first index column to
+	// ensure that ORCA doesn't assume its ordered and skip on adding a sort when there is
+	// order by clause. If it's not on the first index key column, the qual will be considered
+	// as a filter instead of being part of the index qual.
+	return (
+		(CUtils::FScalarIdent(pexprScalar) &&
+		 pcrFirstIndexKey->Id() ==
+			 CScalarIdent::PopConvert(pexprScalar->Pop())->Pcr()->Id()) ||
+		(CCastUtils::FBinaryCoercibleCastedScId(pexprScalar) &&
+		 pcrFirstIndexKey->Id() ==
+			 CScalarIdent::PopConvert((*pexprScalar)[0]->Pop())->Pcr()->Id()));
+}
+
 CExpression *
 CPredicateUtils::ValidatePartPruningExpr(CMemoryPool *mp, CExpression *expr,
 										 CColRef *pcrPartKey,
@@ -1909,12 +1933,10 @@ CPredicateUtils::FColumnDisjunctionOfConst(CConstraintInterval *pcnstrInterval,
 
 // helper to create index lookup comparison predicate with index key on left side
 CExpression *
-CPredicateUtils::PexprIndexLookupKeyOnLeft(CMemoryPool *mp,
-										   CMDAccessor *md_accessor,
-										   CExpression *pexprScalar,
-										   const IMDIndex *pmdindex,
-										   CColRefArray *pdrgpcrIndex,
-										   CColRefSet *outer_refs)
+CPredicateUtils::PexprIndexLookupKeyOnLeft(
+	CMemoryPool *mp, CMDAccessor *md_accessor, CExpression *pexprScalar,
+	const IMDIndex *pmdindex, CColRefArray *pdrgpcrIndex,
+	CColRefSet *outer_refs, BOOL allowArrayCmpIndexQual)
 {
 	GPOS_ASSERT(nullptr != pexprScalar);
 
@@ -1922,6 +1944,14 @@ CPredicateUtils::PexprIndexLookupKeyOnLeft(CMemoryPool *mp,
 	CExpression *pexprRight = (*pexprScalar)[1];
 
 	CColRefSet *pcrsIndex = GPOS_NEW(mp) CColRefSet(mp, pdrgpcrIndex);
+	if (!allowArrayCmpIndexQual &&
+		IMDIndex::EmdindBtree == pmdindex->IndexType() &&
+		CUtils::FScalarArrayCmp(pexprScalar) &&
+		!IsScalarArrayCmpValidIndexQual(pexprScalar, pdrgpcrIndex))
+	{
+		pcrsIndex->Release();
+		return nullptr;
+	}
 
 	if ((CUtils::FScalarIdent(pexprLeft) &&
 		 pcrsIndex->FMember(
@@ -1969,12 +1999,10 @@ CPredicateUtils::PexprIndexLookupKeyOnLeft(CMemoryPool *mp,
 
 // helper to create index lookup comparison predicate with index key on right side
 CExpression *
-CPredicateUtils::PexprIndexLookupKeyOnRight(CMemoryPool *mp,
-											CMDAccessor *md_accessor,
-											CExpression *pexprScalar,
-											const IMDIndex *pmdindex,
-											CColRefArray *pdrgpcrIndex,
-											CColRefSet *outer_refs)
+CPredicateUtils::PexprIndexLookupKeyOnRight(
+	CMemoryPool *mp, CMDAccessor *md_accessor, CExpression *pexprScalar,
+	const IMDIndex *pmdindex, CColRefArray *pdrgpcrIndex,
+	CColRefSet *outer_refs, BOOL allowArrayCmpIndexQual)
 {
 	GPOS_ASSERT(nullptr != pexprScalar);
 
@@ -1992,9 +2020,9 @@ CPredicateUtils::PexprIndexLookupKeyOnRight(CMemoryPool *mp,
 			pexprLeft->AddRef();
 			CExpression *pexprCommuted = GPOS_NEW(mp)
 				CExpression(mp, popScCmpCommute, pexprRight, pexprLeft);
-			CExpression *pexprIndexCond =
-				PexprIndexLookupKeyOnLeft(mp, md_accessor, pexprCommuted,
-										  pmdindex, pdrgpcrIndex, outer_refs);
+			CExpression *pexprIndexCond = PexprIndexLookupKeyOnLeft(
+				mp, md_accessor, pexprCommuted, pmdindex, pdrgpcrIndex,
+				outer_refs, allowArrayCmpIndexQual);
 			pexprCommuted->Release();
 
 			return pexprIndexCond;
@@ -2007,9 +2035,11 @@ CPredicateUtils::PexprIndexLookupKeyOnRight(CMemoryPool *mp,
 // Check if given expression is a valid index lookup predicate, and
 // return modified (as needed) expression to be used for index lookup,
 // a scalar expression is a valid index lookup predicate if it is in one
-// the two forms:
+// the below forms:
 //	[index-key CMP expr]
 //	[expr CMP index-key]
+//	[index-key IS NULL]
+//	[index-key IS NOT NULL]
 // where expr is a scalar expression that is free of index keys and
 // may have outer references (in the case of index nested loops)
 CExpression *
@@ -2018,10 +2048,25 @@ CPredicateUtils::PexprIndexLookup(CMemoryPool *mp, CMDAccessor *md_accessor,
 								  const IMDIndex *pmdindex,
 								  CColRefArray *pdrgpcrIndex,
 								  CColRefSet *outer_refs,
-								  BOOL allowArrayCmpForBTreeIndexes)
+								  BOOL allowArrayCmpIndexQual)
 {
 	GPOS_ASSERT(nullptr != pexprScalar);
 	GPOS_ASSERT(nullptr != pdrgpcrIndex);
+
+	// Predicate of form 'col IS NULL' or 'col IS NOT NULL'.
+	// This check is to enable support of "IS NULL/IS NOT NULL" conditions
+	// for btree indices.
+	if (((CUtils::FScalarIdentNullTest(pexprScalar)) ||
+		 (FNot(pexprScalar) &&
+		  CUtils::FScalarIdentNullTest((*pexprScalar)[0]))) &&
+		pmdindex->IndexType() == gpmd::IMDIndex::EmdindBtree)
+	{
+		// Expression is not transformed to a comparison as 'col IS NULL'
+		// or 'col IS NOT NULL' are not equivalent to 'col = NULL' or
+		// 'col!=NULL' respectively.
+		pexprScalar->AddRef();
+		return pexprScalar;
+	}
 
 	IMDType::ECmpType cmptype = IMDType::EcmptOther;
 
@@ -2030,11 +2075,14 @@ CPredicateUtils::PexprIndexLookup(CMemoryPool *mp, CMDAccessor *md_accessor,
 		cmptype = CScalarCmp::PopConvert(pexprScalar->Pop())->ParseCmpType();
 	}
 	else if (CUtils::FScalarArrayCmp(pexprScalar) &&
+			 CScalarArrayCmp::EarrcmpAny ==
+				 CScalarArrayCmp::PopConvert(pexprScalar->Pop())->Earrcmpt() &&
 			 (IMDIndex::EmdindBitmap == pmdindex->IndexType() ||
-			  (allowArrayCmpForBTreeIndexes &&
-			   IMDIndex::EmdindBtree == pmdindex->IndexType())))
+			  IMDIndex::EmdindBtree == pmdindex->IndexType() ||
+			  (allowArrayCmpIndexQual &&
+			   IMDIndex::EmdindHash == pmdindex->IndexType())))
 	{
-		// array cmps are always allowed on bitmap indexes and when requested on btree indexes
+		// array cmps are always allowed on bitmap/btree indexes and when requested on hash indexes
 		cmptype = CUtils::ParseCmpType(
 			CScalarArrayCmp::PopConvert(pexprScalar->Pop())->MdIdOp());
 	}
@@ -2058,14 +2106,16 @@ CPredicateUtils::PexprIndexLookup(CMemoryPool *mp, CMDAccessor *md_accessor,
 	}
 
 	CExpression *pexprIndexLookupKeyOnLeft = PexprIndexLookupKeyOnLeft(
-		mp, md_accessor, pexprScalar, pmdindex, pdrgpcrIndex, outer_refs);
+		mp, md_accessor, pexprScalar, pmdindex, pdrgpcrIndex, outer_refs,
+		allowArrayCmpIndexQual);
 	if (nullptr != pexprIndexLookupKeyOnLeft)
 	{
 		return pexprIndexLookupKeyOnLeft;
 	}
 
 	CExpression *pexprIndexLookupKeyOnRight = PexprIndexLookupKeyOnRight(
-		mp, md_accessor, pexprScalar, pmdindex, pdrgpcrIndex, outer_refs);
+		mp, md_accessor, pexprScalar, pmdindex, pdrgpcrIndex, outer_refs,
+		allowArrayCmpIndexQual);
 	if (nullptr != pexprIndexLookupKeyOnRight)
 	{
 		return pexprIndexLookupKeyOnRight;
@@ -2080,10 +2130,10 @@ CPredicateUtils::ExtractIndexPredicates(
 	CMemoryPool *mp, CMDAccessor *md_accessor,
 	CExpressionArray *pdrgpexprPredicate, const IMDIndex *pmdindex,
 	CColRefArray *pdrgpcrIndex, CExpressionArray *pdrgpexprIndex,
-	CExpressionArray *pdrgpexprResidual,
+	CExpressionArray *pdrgpexprResidual, ULONG &ulUnindexedPredColCount,
 	CColRefSet *
 		pcrsAcceptedOuterRefs,	// outer refs that are acceptable in an index predicate
-	BOOL allowArrayCmpForBTreeIndexes)
+	BOOL allowArrayCmpIndexQual)
 {
 	const ULONG length = pdrgpexprPredicate->Size();
 
@@ -2110,6 +2160,7 @@ CPredicateUtils::ExtractIndexPredicates(
 		if (!fSubset)
 		{
 			pdrgpexprResidual->Append(pexprCond);
+			ulUnindexedPredColCount = ulUnindexedPredColCount + 1;
 			continue;
 		}
 
@@ -2140,7 +2191,7 @@ CPredicateUtils::ExtractIndexPredicates(
 			// attempt building index lookup predicate
 			CExpression *pexprLookupPred = PexprIndexLookup(
 				mp, md_accessor, pexprCond, pmdindex, pdrgpcrIndex,
-				pcrsAcceptedOuterRefs, allowArrayCmpForBTreeIndexes);
+				pcrsAcceptedOuterRefs, allowArrayCmpIndexQual);
 			if (nullptr != pexprLookupPred)
 			{
 				pexprCond->Release();
@@ -2148,7 +2199,17 @@ CPredicateUtils::ExtractIndexPredicates(
 			}
 			else
 			{
-				// not a supported predicate
+				// Not a supported predicate, eg:
+				// create table j1 (a1 int, b1 int, primary key(a1,b1));
+				// create table j2 (a2 int, b2 int, primary key(a2,b2));
+				// explain (costs off) select * from j1
+				// inner join j2 on j1.a1 = j2.a2 and j1.b1 = j2.b2
+				// where j1.a1 % 1000 = 1 and j2.a2 % 1000 = 2;
+				// here both the conditions in the 'where' clause are -
+				// 'not supported index predicate'.
+				// For table J1 :
+				// Supported predicate condition : j1.a1 = j2.a2 and j1.b1 = j2.b2
+				// Unsupported predicate condition :  j1.a1 % 1000 = 1
 				pdrgpexprTarget = pdrgpexprResidual;
 			}
 		}
@@ -2157,6 +2218,16 @@ CPredicateUtils::ExtractIndexPredicates(
 	}
 
 	pcrsIndex->Release();
+
+	// In a case, where there is no predicate on the index columns but
+	// still an Index scan is created, (Eg: Order by some index columns)
+	// then ulUnindexedPredColCount is not valid for costing.
+	// eg: explain select a from foo order by a limit 10; {idx_a on table},
+	// ulUnindexedPredColCount = 1, but (pdrgpexprIndex->Size()=0)
+	if (pdrgpexprIndex->Size() == 0)
+	{
+		ulUnindexedPredColCount = 0;
+	}
 }
 
 // split given scalar expression into two conjunctions; without outer
@@ -2172,20 +2243,19 @@ CPredicateUtils::SeparateOuterRefs(CMemoryPool *mp, CExpression *pexprScalar,
 	GPOS_ASSERT(nullptr != ppexprLocal);
 	GPOS_ASSERT(nullptr != ppexprOuterRef);
 
-	CColRefSet *pcrsUsed = pexprScalar->DeriveUsedColumns();
-	if (pcrsUsed->IsDisjoint(outer_refs))
-	{
-		// if used columns are disjoint from outer references, return input expression
-		pexprScalar->AddRef();
-		*ppexprLocal = pexprScalar;
-		*ppexprOuterRef = CUtils::PexprScalarConstBool(mp, true /*fval*/);
-		return;
-	}
-
 	if (COperator::EopScalarNAryJoinPredList == pexprScalar->Pop()->Eopid())
 	{
-		// for a ScalarNAryJoinPredList we have to preserve that operator and
-		// separate the outer refs from each of its children
+		// For a ScalarNAryJoinPredList we have to preserve that operator and
+		// separate the outer refs from each of its children. This check needs
+		// to be done prior checking the disjoint between derived used columns
+		// of pexprScalar and outer_refs. The reason for this is that while
+		// deriving stats, the subquery within a CScalarNAryJoinPredList is
+		// transformed to a CScalarConst, and if the subquery contains an outer
+		// reference then that info is lost. Consequently, a CScalarConst will
+		// be returned for ppexprOuterRef because the disjoint between derived
+		// used columns of pexprScalar and outer_refs will evaluate to true. In
+		// that case ScalarNAryJoinPredList will not be preserved which is
+		// undesired.
 		CExpressionArray *localChildren = GPOS_NEW(mp) CExpressionArray(mp);
 		CExpressionArray *outerRefChildren = GPOS_NEW(mp) CExpressionArray(mp);
 
@@ -2200,7 +2270,8 @@ CPredicateUtils::SeparateOuterRefs(CMemoryPool *mp, CExpression *pexprScalar,
 			outerRefChildren->Append(childOuterRefExpr);
 		}
 
-		// reassemble the CScalarNAryJoinPredList with its new children without outer refs
+		// reassemble the CScalarNAryJoinPredList with its new children without
+		// outer refs
 		pexprScalar->Pop()->AddRef();
 		*ppexprLocal =
 			GPOS_NEW(mp) CExpression(mp, pexprScalar->Pop(), localChildren);
@@ -2210,6 +2281,17 @@ CPredicateUtils::SeparateOuterRefs(CMemoryPool *mp, CExpression *pexprScalar,
 		*ppexprOuterRef =
 			GPOS_NEW(mp) CExpression(mp, pexprScalar->Pop(), outerRefChildren);
 
+		return;
+	}
+
+	CColRefSet *pcrsUsed = pexprScalar->DeriveUsedColumns();
+	if (pcrsUsed->IsDisjoint(outer_refs))
+	{
+		// if used columns are disjoint from outer references, return input
+		// expression
+		pexprScalar->AddRef();
+		*ppexprLocal = pexprScalar;
+		*ppexprOuterRef = CUtils::PexprScalarConstBool(mp, true /*fval*/);
 		return;
 	}
 

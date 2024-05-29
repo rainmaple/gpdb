@@ -1195,6 +1195,10 @@ rq.oid=rc.resqueueid AND rc.restypid = rt.restypid
 ORDER BY rsqname, restypid
 ;
 
+-- FIXME: we have a cluster-wide view gp_stat_database_conflicts, but that is 
+-- only showing conflicts of every segment. Some conflict might be encountered
+-- on just part of the segments. Ideally we should have a view like
+-- gp_stat_database_conflicts_summary that prints the overall conflicts and types.
 CREATE VIEW pg_stat_database_conflicts AS
     SELECT
             D.oid AS datid,
@@ -1241,19 +1245,41 @@ CREATE VIEW pg_stat_archiver AS
         s.stats_reset
     FROM pg_stat_get_archiver() s;
 
-CREATE VIEW pg_stat_bgwriter AS
+-- Internal function for pg_stat_bgwriter. It needs to be VOLATILE in order
+-- for pg_stat_bgwriter to work correctly with gp_dist_random.
+CREATE OR REPLACE FUNCTION pg_stat_bgwriter_func()
+RETURNS TABLE (
+    checkpoints_timed BIGINT,
+    checkpoints_req BIGINT,
+    checkpoint_write_time FLOAT,
+    checkpoint_sync_time FLOAT,
+    buffers_checkpoint BIGINT,
+    buffers_clean BIGINT,
+    maxwritten_clean BIGINT,
+    buffers_backend BIGINT,
+    buffers_backend_fsync BIGINT,
+    buffers_alloc BIGINT,
+    stats_reset TIMESTAMPTZ
+)
+AS
+$$
     SELECT
-        pg_stat_get_bgwriter_timed_checkpoints() AS checkpoints_timed,
-        pg_stat_get_bgwriter_requested_checkpoints() AS checkpoints_req,
-        pg_stat_get_checkpoint_write_time() AS checkpoint_write_time,
-        pg_stat_get_checkpoint_sync_time() AS checkpoint_sync_time,
-        pg_stat_get_bgwriter_buf_written_checkpoints() AS buffers_checkpoint,
-        pg_stat_get_bgwriter_buf_written_clean() AS buffers_clean,
-        pg_stat_get_bgwriter_maxwritten_clean() AS maxwritten_clean,
-        pg_stat_get_buf_written_backend() AS buffers_backend,
-        pg_stat_get_buf_fsync_backend() AS buffers_backend_fsync,
-        pg_stat_get_buf_alloc() AS buffers_alloc,
-        pg_stat_get_bgwriter_stat_reset_time() AS stats_reset;
+        pg_stat_get_bgwriter_timed_checkpoints(),
+        pg_stat_get_bgwriter_requested_checkpoints(),
+        pg_stat_get_checkpoint_write_time(),
+        pg_stat_get_checkpoint_sync_time(),
+        pg_stat_get_bgwriter_buf_written_checkpoints(),
+        pg_stat_get_bgwriter_buf_written_clean(),
+        pg_stat_get_bgwriter_maxwritten_clean(),
+        pg_stat_get_buf_written_backend(),
+        pg_stat_get_buf_fsync_backend(),
+        pg_stat_get_buf_alloc(),
+        pg_stat_get_bgwriter_stat_reset_time();
+$$
+LANGUAGE SQL;
+
+CREATE VIEW pg_stat_bgwriter AS
+    SELECT * FROM pg_stat_bgwriter_func();
 
 CREATE VIEW pg_stat_wal AS
     SELECT
@@ -1410,6 +1436,22 @@ CREATE VIEW pg_stat_progress_copy AS
         S.param4 AS tuples_excluded
     FROM pg_stat_get_progress_info('COPY') AS S
         LEFT JOIN pg_database D ON S.datid = D.oid;
+
+CREATE VIEW gp_stat_progress_dtx_recovery AS
+    SELECT
+        CASE S.param1 WHEN 0 THEN 'initializing'
+                      WHEN 1 THEN 'recovering commited distributed transactions'
+                      WHEN 2 THEN 'gathering in-doubt transactions'
+                      WHEN 3 THEN 'aborting in-doubt transactions'
+                      WHEN 4 THEN 'gathering in-doubt orphaned transactions'
+                      WHEN 5 THEN 'managing in-doubt orphaned transactions'
+                      END AS phase,
+        S.param2 AS recover_commited_dtx_total, -- total commited transactions found to recover
+        S.param3 AS recover_commited_dtx_completed, -- recover completed, this is always 0 after startup.
+        S.param4 AS in_doubt_tx_total,  -- total in doubt tx found, used in startup and non-startup phase
+        S.param5 AS in_doubt_tx_in_progress, -- in-progress in-doubt tx, this is always 0 for startup
+        S.param6 AS in_doubt_tx_aborted -- aborted in-doubt tx, this can be >0 for both
+    FROM pg_stat_get_progress_info('DTX RECOVERY') AS S;
 
 CREATE VIEW pg_user_mappings AS
     SELECT
@@ -1797,6 +1839,13 @@ $$
   select sum(n) from brin_summarize_new_values_internal(t) as n;
 $$
 LANGUAGE sql READS SQL DATA EXECUTE ON COORDINATOR;
+
+create or replace function brin_desummarize_range(t regclass, block_number int8) returns setof void as
+$$
+  -- brin_desummarize_range_internal is marked as EXECUTE ON ALL SEGMENTS.
+select brin_desummarize_range_internal(t, block_number);
+$$
+LANGUAGE SQL READS SQL DATA EXECUTE ON COORDINATOR;
 
 ------------------------------------------------------------------
 -- GPDB endpoint related views and functions

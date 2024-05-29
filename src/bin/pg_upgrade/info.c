@@ -121,19 +121,9 @@ gen_db_file_maps(DbInfo *old_db, DbInfo *new_db,
 		 * Verify that rels of same OID have same name.  The namespace name
 		 * should always match, but the relname might not match for TOAST
 		 * tables (and, therefore, their indexes).
-		 *
-		 * TOAST table names initially match the heap pg_class oid, but
-		 * pre-9.0 they can change during certain commands such as CLUSTER, so
-		 * don't insist on a match if old cluster is < 9.0.
-		 *
-		 * XXX GPDB: for TOAST tables, don't insist on a match at all
-		 * yet; there are other ways for us to get mismatched names. Ideally
-		 * this will go away eventually.
 		 */
 		if (strcmp(old_rel->nspname, new_rel->nspname) != 0 ||
-			(strcmp(old_rel->relname, new_rel->relname) != 0 &&
-			 (/* GET_MAJOR_VERSION(old_cluster.major_version) >= 900 || */
-			  strcmp(old_rel->nspname, "pg_toast") != 0)))
+			strcmp(old_rel->relname, new_rel->relname) != 0)
 		{
 			pg_log(PG_WARNING, "Relation names for OID %u in database \"%s\" do not match: "
 				   "old name \"%s.%s\", new name \"%s.%s\"\n",
@@ -157,7 +147,7 @@ gen_db_file_maps(DbInfo *old_db, DbInfo *new_db,
 			continue;
 		}
 
-		/* XXX Why are we doing this here and not in get_rel_infos()? */
+		/* GPDB_UPGRADE_FIXME Why are we doing this here and not in get_rel_infos()? */
 		if (old_rel->aosegments != NULL)
 			old_rel->reltype = AO;
 		else if (old_rel->aocssegments != NULL)
@@ -384,19 +374,18 @@ get_db_infos(ClusterInfo *cluster)
 				i_datctype,
 				i_spclocation;
 	char		query[QUERY_ALLOC];
+	int			i_datfrozenxid;
+	int			i_datminmxid = 0;
 
 	snprintf(query, sizeof(query),
-			 "SELECT d.oid, d.datname, d.encoding, d.datcollate, d.datctype, "
-			 "%s AS spclocation "
+			 "SELECT d.oid, d.datname, d.encoding, d.datcollate, d.datctype, d.datfrozenxid, d.datminmxid, "
+			 "pg_catalog.pg_tablespace_location(t.oid) AS spclocation "
 			 "FROM pg_catalog.pg_database d "
 			 " LEFT OUTER JOIN pg_catalog.pg_tablespace t "
 			 " ON d.dattablespace = t.oid "
 			 "WHERE d.datallowconn = true "
 	/* we don't preserve pg_database.oid so we sort by name */
-			 "ORDER BY 2",
-	/* 9.2 removed the spclocation column */
-			 (GET_MAJOR_VERSION(cluster->major_version) == 803) ?
-			 "t.spclocation" : "pg_catalog.pg_tablespace_location(t.oid)");
+			 "ORDER BY 2");
 
 	res = executeQueryOrDie(conn, "%s", query);
 
@@ -406,6 +395,8 @@ get_db_infos(ClusterInfo *cluster)
 	i_datcollate = PQfnumber(res, "datcollate");
 	i_datctype = PQfnumber(res, "datctype");
 	i_spclocation = PQfnumber(res, "spclocation");
+	i_datfrozenxid = PQfnumber(res, "datfrozenxid");
+	i_datminmxid = PQfnumber(res, "datminmxid");
 
 	ntups = PQntuples(res);
 	dbinfos = (DbInfo *) pg_malloc(sizeof(DbInfo) * ntups);
@@ -417,6 +408,8 @@ get_db_infos(ClusterInfo *cluster)
 		dbinfos[tupnum].db_encoding = atoi(PQgetvalue(res, tupnum, i_encoding));
 		dbinfos[tupnum].db_collate = pg_strdup(PQgetvalue(res, tupnum, i_datcollate));
 		dbinfos[tupnum].db_ctype = pg_strdup(PQgetvalue(res, tupnum, i_datctype));
+		dbinfos[tupnum].datfrozenxid = strtoul(PQgetvalue(res, tupnum, i_datfrozenxid), NULL, 10);
+		dbinfos[tupnum].datminmxid = strtoul(PQgetvalue(res, tupnum, i_datminmxid), NULL, 10);
 		snprintf(dbinfos[tupnum].db_tablespace, sizeof(dbinfos[tupnum].db_tablespace), "%s",
 				 PQgetvalue(res, tupnum, i_spclocation));
 	}
@@ -489,7 +482,8 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 			 "  WHERE relkind IN (" CppAsString2(RELKIND_RELATION) ", "
 			 CppAsString2(RELKIND_AOSEGMENTS) ", "
 			 CppAsString2(RELKIND_AOBLOCKDIR) ", "
-			 CppAsString2(RELKIND_MATVIEW) " %s) AND "
+			 CppAsString2(RELKIND_MATVIEW) ", "
+			 CppAsString2(RELKIND_SEQUENCE) ") AND "
 	/* exclude possible orphaned temp tables */
 			 "    ((n.nspname !~ '^pg_temp_' AND "
 			 "      n.nspname !~ '^pg_toast_temp_' AND "
@@ -498,10 +492,9 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 			 "                        'binary_upgrade', 'pg_toast') AND "
 			 "      c.oid >= %u::pg_catalog.oid) OR "
 			 "     (n.nspname = 'pg_catalog' AND "
-			 "      relname IN ('pg_largeobject') ))), ",
-	/* see the comment at the top of old_8_3_create_sequence_script() */
-			 (GET_MAJOR_VERSION(old_cluster.major_version) == 803) ?
-			 "" : ", " CppAsString2(RELKIND_SEQUENCE), FirstNormalObjectId);
+			 "      relname IN ('pg_largeobject', "
+			 "					'gp_fastsequence', 'gp_fastsequence_objid_objmod_index') ))), ",
+			 FirstNormalObjectId);
 
 	/*
 	 * Add a CTE that collects OIDs of toast tables belonging to the tables
@@ -543,7 +536,8 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 	snprintf(query + strlen(query), sizeof(query) - strlen(query),
 			 "SELECT all_rels.*, n.nspname, c.relname, "
 			 "  %s as relstorage, c.relkind, "
-			 "  c.relfilenode, c.reltablespace, %s "
+			 "  c.relfilenode, c.reltablespace, "
+			 "  pg_catalog.pg_tablespace_location(t.oid) AS spclocation "
 			 "FROM (SELECT * FROM regular_heap "
 			 "      UNION ALL "
 			 "      SELECT * FROM toast_heap "
@@ -568,13 +562,6 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 			 " WHEN am.amname = 'heap' THEN 'h'"
 			 " WHEN c.relkind = 'f' THEN 'x'"
 			 " ELSE '' END)",
-
-	/*
-	 * 9.2 removed the spclocation column in upstream postgres, in GPDB it was
-	 * removed in 6.0.0 during the 8.4 merge
-	 */
-			(GET_MAJOR_VERSION(cluster->major_version) == 803) ?
-			 "t.spclocation" : "pg_catalog.pg_tablespace_location(t.oid) AS spclocation",
 
 			(GET_MAJOR_VERSION(cluster->major_version) <= 1000) ?
 			 "" : "LEFT OUTER JOIN pg_catalog.pg_am am ON c.relam = am.oid");

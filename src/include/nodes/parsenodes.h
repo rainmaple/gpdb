@@ -56,7 +56,7 @@ typedef enum SortByDir
 	SORTBY_DEFAULT,
 	SORTBY_ASC,
 	SORTBY_DESC,
-	SORTBY_USING				/* not allowed in CREATE INDEX ... */
+	SORTBY_USING				/* not allowed in CREATE INDEX or AT REPACK */
 } SortByDir;
 
 typedef enum SortByNulls
@@ -746,6 +746,9 @@ typedef enum TableLikeOption
 	CREATE_TABLE_LIKE_INDEXES = 1 << 5,
 	CREATE_TABLE_LIKE_STATISTICS = 1 << 6,
 	CREATE_TABLE_LIKE_STORAGE = 1 << 7,
+	CREATE_TABLE_LIKE_ENCODING = 1 << 8,
+	CREATE_TABLE_LIKE_RELOPT = 1 << 9,
+	CREATE_TABLE_LIKE_AM = 1 << 10,
 	CREATE_TABLE_LIKE_ALL = PG_INT32_MAX
 } TableLikeOption;
 
@@ -877,7 +880,7 @@ typedef struct PartitionSpec
 								 * 'range') */
 	List	   *partParams;		/* List of PartitionElems */
 
-	struct GpPartitionDefinition *gpPartDef;
+	struct GpPartitionDefinition *gpPartDef; /* contains legacy partition definition */
 	struct PartitionSpec         *subPartSpec;     /* subpartition specification */
 	int                          location;		/* token location, or -1 if unknown */
 } PartitionSpec;
@@ -2013,7 +2016,10 @@ typedef enum AlterTableType
 	AT_PartRename,				/* Rename */
 	AT_PartSetTemplate,			/* Set Subpartition Template */
 	AT_PartSplit,				/* Split */
-	AT_PartTruncate				/* Truncate */
+	AT_PartTruncate,			/* Truncate */
+
+	/* kept at end for ABI hygiene */
+	AT_RepackTable				/* REPACK TABLE */
 } AlterTableType;
 
 typedef struct ReplicaIdentityStmt
@@ -2273,7 +2279,7 @@ typedef struct CopyStmt
 	List	   *options;		/* List of DefElem nodes */
 	Node	   *whereClause;	/* WHERE condition (or NULL) */
 
-	Node	   *sreh;			/* Single row error handling info */
+	List	   *sreh;			/* Single row error handling info */
 } CopyStmt;
 
 /* ----------------------
@@ -2312,6 +2318,21 @@ typedef struct VariableShowStmt
 	char	   *name;
 } VariableShowStmt;
 
+/*
+ * GPDB: Where did the CreateStmt originate? Was it generated and if so, what
+ * type of operation generated it?
+ *
+ * Note: 'classic' syntax refers to the legacy GPDB partitioning syntax that
+ * predates the upstream partitioning syntax that was acquired during the
+ * Postgres 12 merge.
+ */
+typedef enum CreateStmtOrigin
+{
+	ORIGIN_NO_GEN,
+	ORIGIN_GP_CLASSIC_CREATE_GEN,
+	ORIGIN_GP_CLASSIC_ALTER_GEN,
+} CreateStmtOrigin;
+
 /* ----------------------
  *		Create Table Statement
  *
@@ -2340,7 +2361,7 @@ typedef struct CreateStmt
 	char	   *tablespacename; /* table space to use, or NULL */
 	char	   *accessMethod;	/* table access method */
 	bool		if_not_exists;	/* just do nothing if it already exists? */
-	bool 		gp_style_alter_part; /* is this due to a GP-style ALTER on partition tables? */
+	bool 		gp_style_alter_part; /* unused */
 
 	DistributedBy *distributedBy;   /* what columns we distribute the data by */
 	Node       *partitionBy;     /* what columns we partition the data by */
@@ -2355,6 +2376,8 @@ typedef struct CreateStmt
 	/* names chosen for partition indexes */
 	List	   *part_idx_oids;
 	List	   *part_idx_names;
+
+	CreateStmtOrigin origin;	/* GPDB: provenance of this CreateStmt */
 } CreateStmt;
 
 /* ----------------------

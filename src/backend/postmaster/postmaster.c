@@ -428,11 +428,7 @@ static BackgroundWorker PMAuxProcList[MaxPMAuxProc] =
 
 #ifdef ENABLE_IC_PROXY
 	{"ic proxy process", "ic proxy process",
-#ifdef FAULT_INJECTOR
 	 BGWORKER_SHMEM_ACCESS,
-#else
-	 0,
-#endif
 	 BgWorkerStart_RecoveryFinished,
 	 0, /* restart immediately if ic proxy process exits with non-zero code */
 	 "postgres", "ICProxyMain", 0, {0}, 0,
@@ -538,6 +534,9 @@ static void InitPostmasterDeathWatchHandle(void);
 
 static void setProcAffinity(int id);
 
+/* helper function */
+static void getLogDirectoryAbsolutePath(char *out_buf, size_t len);
+
 /*
  * Archiver is allowed to start up at the current postmaster state?
  *
@@ -545,9 +544,10 @@ static void setProcAffinity(int id);
  * even during recovery.
  */
 #define PgArchStartupAllowed()	\
-	((XLogArchivingActive() && pmState == PM_RUN) ||	\
-	 (XLogArchivingAlways() &&	\
-	  (pmState == PM_RECOVERY || pmState == PM_HOT_STANDBY)))
+	(((XLogArchivingActive() && pmState == PM_RUN) ||			\
+	  (XLogArchivingAlways() &&									  \
+	   (pmState == PM_RECOVERY || pmState == PM_HOT_STANDBY))) && \
+	 PgArchCanRestart())
 
 bool isAuxiliaryBgWorker(BackgroundWorker *worker);
 
@@ -654,6 +654,7 @@ static void ShmemBackendArrayRemove(Backend *bn);
 #endif							/* EXEC_BACKEND */
 
 #define StartupDataBase()		StartChildProcess(StartupProcess)
+#define StartArchiver()			StartChildProcess(ArchiverProcess)
 #define StartBackgroundWriter() StartChildProcess(BgWriterProcess)
 #define StartCheckpointer()		StartChildProcess(CheckpointerProcess)
 #define StartWalWriter()		StartChildProcess(WalWriterProcess)
@@ -741,10 +742,10 @@ PostmasterMain(int argc, char *argv[])
 	 * is used by all child processes and client processes).  That has a
 	 * couple of special behaviors:
 	 *
-	 * 1. Except on Windows, we tell sigaction() to block all signals for the
-	 * duration of the signal handler.  This is faster than our old approach
-	 * of blocking/unblocking explicitly in the signal handler, and it should
-	 * also prevent excessive stack consumption if signals arrive quickly.
+	 * 1. We tell sigaction() to block all signals for the duration of the
+	 * signal handler.  This is faster than our old approach of
+	 * blocking/unblocking explicitly in the signal handler, and it should also
+	 * prevent excessive stack consumption if signals arrive quickly.
 	 *
 	 * 2. We do not set the SA_RESTART flag.  This is because signals will be
 	 * blocked at all times except when ServerLoop is waiting for something to
@@ -1016,14 +1017,13 @@ PostmasterMain(int argc, char *argv[])
 	}
 
 	/*
-	 * If gp_role is not set, use utility role instead, and it could not be
-	 * changed by GUC commands because the source is PGC_S_OVERRIDE.
+	 * If gp_role is not set, use utility role instead.
 	 *
 	 * A single node coordinator or segment is set to utility, which is not
 	 * before Greenplum 7.
 	 */
 	if (Gp_role == GP_ROLE_UNDEFINED)
-		SetConfigOption("gp_role", "utility", PGC_POSTMASTER, PGC_S_OVERRIDE);
+		SetConfigOption("gp_role", "utility", PGC_POSTMASTER, PGC_S_DYNAMIC_DEFAULT);
 
 	/*
 	 * Locate the proper configuration files and data directory, and read
@@ -1763,6 +1763,17 @@ checkControlFile(void)
 	FreeFile(fp);
 }
 
+static void
+getLogDirectoryAbsolutePath(char *out_buf, size_t len)
+{
+	if (is_absolute_path(Log_directory))
+	{
+		snprintf(out_buf, len, "%s",  Log_directory);
+		return;
+	}
+
+	snprintf(out_buf, len, "%s/%s", DataDir, Log_directory);
+}
 
 /*
  * check if file or directory under "DataDir" exists and is accessible
@@ -1782,7 +1793,7 @@ checkPgDir(const char *dir)
 	if (stat(buf, &st) != 0)
 	{
 		/* check if log is there */
-		snprintf(buf, sizeof(buf), "%s%s", DataDir, "/log");
+		getLogDirectoryAbsolutePath(buf, sizeof(buf));
 		if (stat(buf, &st) == 0)
 			elog(LOG, "System file or directory missing (%s), shutting down segment", dir);
 
@@ -2063,7 +2074,7 @@ ServerLoop(void)
 
 		/* If we have lost the archiver, try to start a new one. */
 		if (PgArchPID == 0 && PgArchStartupAllowed())
-			PgArchPID = pgarch_start();
+			PgArchPID = StartArchiver();
 
 		/* If we need to signal the autovacuum launcher, do so now */
 		if (avlauncher_needs_signal)
@@ -3150,14 +3161,6 @@ SIGHUP_handler(SIGNAL_ARGS)
 {
 	int			save_errno = errno;
 
-	/*
-	 * We rely on the signal mechanism to have blocked all signals ... except
-	 * on Windows, which lacks sigaction(), so we have to do it manually.
-	 */
-#ifdef WIN32
-	PG_SETMASK(&BlockSig);
-#endif
-
 	if (Shutdown <= SmartShutdown)
 	{
 		ereport(LOG,
@@ -3216,10 +3219,6 @@ SIGHUP_handler(SIGNAL_ARGS)
 #endif
 	}
 
-#ifdef WIN32
-	PG_SETMASK(&UnBlockSig);
-#endif
-
 	errno = save_errno;
 }
 
@@ -3231,14 +3230,6 @@ static void
 pmdie(SIGNAL_ARGS)
 {
 	int			save_errno = errno;
-
-	/*
-	 * We rely on the signal mechanism to have blocked all signals ... except
-	 * on Windows, which lacks sigaction(), so we have to do it manually.
-	 */
-#ifdef WIN32
-	PG_SETMASK(&BlockSig);
-#endif
 
 	ereport(DEBUG2,
 			(errmsg_internal("postmaster received signal %d",
@@ -3367,10 +3358,6 @@ pmdie(SIGNAL_ARGS)
 			break;
 	}
 
-#ifdef WIN32
-	PG_SETMASK(&UnBlockSig);
-#endif
-
 	errno = save_errno;
 }
 
@@ -3383,14 +3370,6 @@ reaper(SIGNAL_ARGS)
 	int			save_errno = errno;
 	int			pid;			/* process id of dead child process */
 	int			exitstatus;		/* its exit status */
-
-	/*
-	 * We rely on the signal mechanism to have blocked all signals ... except
-	 * on Windows, which lacks sigaction(), so we have to do it manually.
-	 */
-#ifdef WIN32
-	PG_SETMASK(&BlockSig);
-#endif
 
 	ereport(DEBUG4,
 			(errmsg_internal("reaping dead processes")));
@@ -3492,7 +3471,7 @@ reaper(SIGNAL_ARGS)
 			if (!IsBinaryUpgrade && AutoVacuumingActive() && AutoVacPID == 0)
 				AutoVacPID = StartAutoVacLauncher();
 			if (PgArchStartupAllowed() && PgArchPID == 0)
-				PgArchPID = pgarch_start();
+				PgArchPID = StartArchiver();
 			if (PgStatPID == 0)
 				PgStatPID = pgstat_start();
 
@@ -3642,20 +3621,22 @@ reaper(SIGNAL_ARGS)
 		}
 
 		/*
-		 * Was it the archiver?  If so, just try to start a new one; no need
-		 * to force reset of the rest of the system.  (If fail, we'll try
-		 * again in future cycles of the main loop.).  Unless we were waiting
-		 * for it to shut down; don't restart it in that case, and
+		 * Was it the archiver?  If exit status is zero (normal) or one (FATAL
+		 * exit), we assume everything is all right just like normal backends
+		 * and just try to restart a new one so that we immediately retry
+		 * archiving remaining files. (If fail, we'll try again in future
+		 * cycles of the postmaster's main loop.) Unless we were waiting for
+		 * it to shut down; don't restart it in that case, and
 		 * PostmasterStateMachine() will advance to the next shutdown step.
 		 */
 		if (pid == PgArchPID)
 		{
 			PgArchPID = 0;
-			if (!EXIT_STATUS_0(exitstatus))
-				LogChildExit(LOG, _("archiver process"),
-							 pid, exitstatus);
+			if (!EXIT_STATUS_0(exitstatus) && !EXIT_STATUS_1(exitstatus))
+				HandleChildCrash(pid, exitstatus,
+								 _("archiver process"));
 			if (PgArchStartupAllowed())
-				PgArchPID = pgarch_start();
+				PgArchPID = StartArchiver();
 			continue;
 		}
 
@@ -3706,11 +3687,6 @@ reaper(SIGNAL_ARGS)
 	 * or actions to make.
 	 */
 	PostmasterStateMachine();
-
-	/* Done with signal handler */
-#ifdef WIN32
-	PG_SETMASK(&UnBlockSig);
-#endif
 
 	errno = save_errno;
 }
@@ -3903,7 +3879,7 @@ CleanupBackend(int pid,
 
 /*
  * HandleChildCrash -- cleanup after failed backend, bgwriter, checkpointer,
- * walwriter, autovacuum, or background worker.
+ * walwriter, autovacuum, archiver or background worker.
  *
  * The objectives here are to clean up our local state about the child
  * process, and to signal all other remaining children to quickdie.
@@ -4108,19 +4084,16 @@ HandleChildCrash(int pid, int exitstatus, const char *procname)
 		signal_child(AutoVacPID, (SendStop ? SIGSTOP : SIGQUIT));
 	}
 
-	/*
-	 * Force a power-cycle of the pgarch process too.  (This isn't absolutely
-	 * necessary, but it seems like a good idea for robustness, and it
-	 * simplifies the state-machine logic in the case where a shutdown request
-	 * arrives during crash processing.)
-	 */
-	if (PgArchPID != 0 && take_action)
+	/* Take care of the archiver too */
+	if (pid == PgArchPID)
+		PgArchPID = 0;
+	else if (PgArchPID != 0 && take_action)
 	{
 		ereport(DEBUG2,
 				(errmsg_internal("sending %s to process %d",
-								 "SIGQUIT",
+								 (SendStop ? "SIGSTOP" : "SIGQUIT"),
 								 (int) PgArchPID)));
-		signal_child(PgArchPID, SIGQUIT);
+		signal_child(PgArchPID, (SendStop ? SIGSTOP : SIGQUIT));
 	}
 
 	/*
@@ -4303,12 +4276,11 @@ PostmasterStateMachine(void)
 		 * (including autovac workers), no bgworkers (including unconnected
 		 * ones), and no walwriter, autovac launcher or bgwriter.  If we are
 		 * doing crash recovery or an immediate shutdown then we expect the
-		 * checkpointer to exit as well, otherwise not. The archiver, stats,
-		 * and syslogger processes are disregarded since they are not
-		 * connected to shared memory; we also disregard dead_end children
-		 * here. Walsenders are also disregarded, they will be terminated
-		 * later after writing the checkpoint record, like the archiver
-		 * process.
+		 * checkpointer to exit as well, otherwise not. The stats and
+		 * syslogger processes are disregarded since they are not connected to
+		 * shared memory; we also disregard dead_end children here. Walsenders
+		 * and archiver are also disregarded, they will be terminated later
+		 * after writing the checkpoint record.
 		 */
 		if (CountChildren(BACKEND_TYPE_ALL - BACKEND_TYPE_WALSND) == 0 &&
 			StartupPID == 0 &&
@@ -4411,6 +4383,7 @@ PostmasterStateMachine(void)
 			Assert(CheckpointerPID == 0);
 			Assert(WalWriterPID == 0);
 			Assert(AutoVacPID == 0);
+			Assert(PgArchPID == 0);
 			/* syslogger is not considered here */
 			pmState = PM_NO_CHILDREN;
 		}
@@ -5590,12 +5563,6 @@ SubPostmasterMain(int argc, char *argv[])
 
 		StartBackgroundWorker();
 	}
-	if (strcmp(argv[1], "--forkarch") == 0)
-	{
-		/* Do not want to attach to shared memory */
-
-		PgArchiverMain(argc, argv); /* does not return */
-	}
 	if (strcmp(argv[1], "--forkcol") == 0)
 	{
 		/* Do not want to attach to shared memory */
@@ -5658,14 +5625,6 @@ sigusr1_handler(SIGNAL_ARGS)
 	int			save_errno = errno;
 
 	/*
-	 * We rely on the signal mechanism to have blocked all signals ... except
-	 * on Windows, which lacks sigaction(), so we have to do it manually.
-	 */
-#ifdef WIN32
-	PG_SETMASK(&BlockSig);
-#endif
-
-	/*
 	 * RECOVERY_STARTED and BEGIN_HOT_STANDBY signals are ignored in
 	 * unexpected states. If the startup process quickly starts up, completes
 	 * recovery, exits, we might process the death of the startup process
@@ -5695,7 +5654,7 @@ sigusr1_handler(SIGNAL_ARGS)
 		 */
 		Assert(PgArchPID == 0);
 		if (XLogArchivingAlways())
-			PgArchPID = pgarch_start();
+			PgArchPID = StartArchiver();
 
 		/*
 		 * GPDB: if promote trigger file exist we don't wish to convey
@@ -5774,16 +5733,6 @@ sigusr1_handler(SIGNAL_ARGS)
 	if (StartWorkerNeeded || HaveCrashedWorker)
 		maybe_start_bgworkers();
 
-	if (CheckPostmasterSignal(PMSIGNAL_WAKEN_ARCHIVER) &&
-		PgArchPID != 0)
-	{
-		/*
-		 * Send SIGUSR1 to archiver process, to wake it up and begin archiving
-		 * next WAL file.
-		 */
-		signal_child(PgArchPID, SIGUSR1);
-	}
-
 	/* Tell syslogger to rotate logfile if requested */
 	if (SysLoggerPID != 0)
 	{
@@ -5828,6 +5777,9 @@ sigusr1_handler(SIGNAL_ARGS)
 		MaybeStartWalReceiver();
 	}
 
+	if (CheckPostmasterSignal(PMSIGNAL_WALRCV_STREAMING) && WalReceiverPID != 0)
+		AddToDataDirLockFile(LOCK_FILE_LINE_PM_STATUS, PM_STATUS_WALRECV_STARTED_STREAMING);
+
 	if (CheckPostmasterSignal(PMSIGNAL_WAKEN_FTS) && FtsProbePID() != 0)
 	{
 		signal_child(FtsProbePID(), SIGINT);
@@ -5867,10 +5819,6 @@ sigusr1_handler(SIGNAL_ARGS)
 		/* Tell startup process to finish recovery */
 		signal_child(StartupPID, SIGUSR2);
 	}
-
-#ifdef WIN32
-	PG_SETMASK(&UnBlockSig);
-#endif
 
 	errno = save_errno;
 }
@@ -6064,6 +6012,10 @@ StartChildProcess(AuxProcType type)
 			case StartupProcess:
 				ereport(LOG,
 						(errmsg("could not fork startup process: %m")));
+				break;
+			case ArchiverProcess:
+				ereport(LOG,
+						(errmsg("could not fork archiver process: %m")));
 				break;
 			case BgWriterProcess:
 				ereport(LOG,

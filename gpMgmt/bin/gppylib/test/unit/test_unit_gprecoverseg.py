@@ -23,15 +23,19 @@ class Options:
         self.recoveryConfigFile = None
         self.outputSpareDataDirectoryFile = None
         self.rebalanceSegments = None
+        self.disableReplayLag = None
+        self.replayLag = None
 
         self.outputSampleConfigFile = None
         self.parallelDegree = 1
         self.parallelPerHost = 1
         self.forceFullResynchronization = None
+        self.differentialResynchronization = None
         self.persistent_check = None
         self.quiet = None
         self.interactive = False
         self.hba_hostnames = False
+        self.maxRate = None
 
 
 class GpRecoversegTestCase(GpTestCase):
@@ -71,7 +75,7 @@ class GpRecoversegTestCase(GpTestCase):
 
         self.config_provider_mock.loadSystemConfig.return_value = self.gpArrayMock
 
-        self.mirror_to_build = GpMirrorToBuild(self.mirror0, self.primary0, None, False)
+        self.mirror_to_build = GpMirrorToBuild(self.mirror0, self.primary0, None, False, False)
         self.apply_patches([
             patch('os.environ', new=self.os_env),
             patch('gppylib.db.dbconn.connect', return_value=self.conn),
@@ -88,6 +92,7 @@ class GpRecoversegTestCase(GpTestCase):
             patch.object(GpMirrorListToBuild, "recover_mirrors"),
             patch.object(GpMirrorListToBuild, "getAdditionalWarnings"),
             patch.object(GpMirrorListToBuild, "getMirrorsToBuild"),
+            patch.object(GpMirrorListToBuild, "getMaxTransferRate"),
             patch.object(HeapChecksum, "check_segment_consistency"),
             patch.object(HeapChecksum, "get_segments_checksum_settings"),
         ])

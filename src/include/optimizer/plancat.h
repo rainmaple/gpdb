@@ -42,6 +42,12 @@ extern void cdb_estimate_rel_size(RelOptInfo   *relOptInfo,
 							  double       *tuples,
 							  double       *allvisfrac);
 extern double cdb_estimate_partitioned_numtuples(Relation rel);
+typedef struct PageEstimate
+{
+	BlockNumber		totalpages;
+	BlockNumber		totalallvisiblepages;
+} PageEstimate;
+extern PageEstimate cdb_estimate_partitioned_numpages(Relation rel);
 
 extern int32 get_rel_data_width(Relation rel, int32 *attr_widths);
 extern int32 get_relation_data_width(Oid relid, int32 *attr_widths);
@@ -88,6 +94,8 @@ extern double get_function_rows(PlannerInfo *root, Oid funcid, Node *node);
 extern bool has_row_triggers(PlannerInfo *root, Index rti, CmdType event);
 
 extern bool has_stored_generated_columns(PlannerInfo *root, Index rti);
+
+extern Cost get_ao_decompress_coefficient(RelOptInfo *rel);
 
 #define DEFAULT_EXTERNAL_TABLE_PAGES 1000
 #define DEFAULT_EXTERNAL_TABLE_TUPLES 1000000

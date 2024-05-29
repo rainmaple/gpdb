@@ -131,6 +131,7 @@ extern void XidCacheRemoveRunningXids(TransactionId xid,
 									  TransactionId latestXid);
 						  
 extern PGPROC *FindProcByGpSessionId(long gp_session_id);
+extern List *GetRunningProcSessionIds(void);
 extern void UpdateCommandIdInSnapshot(CommandId curcid);
 
 extern void updateSharedLocalSnapshot(struct DtxContextInfo *dtxContextInfo,
@@ -153,6 +154,9 @@ extern void ProcArrayGetReplicationSlotXmin(TransactionId *xmin,
 											TransactionId *catalog_xmin);
 extern DistributedTransactionId LocalXidGetDistributedXid(TransactionId xid);
 extern int GetSessionIdByPid(int pid);
-extern void ResGroupSignalMoveQuery(int sessionId, void *slot, Oid groupId);
+extern bool ResGroupMoveSignalTarget(int sessionId, void *slot, Oid groupId,
+								bool isExecutor);
+extern void ResGroupMoveCheckTargetReady(int sessionId, bool *clean, bool *result);
+extern void ResGroupMoveNotifyInitiator(pid_t callerPid);
 
 #endif							/* PROCARRAY_H */

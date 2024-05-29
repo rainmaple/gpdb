@@ -49,9 +49,12 @@ cdbgang_createGang_async(List *segments, SegmentType segmentType)
 	PostgresPollingStatusType	*pollingStatus = NULL;
 	SegmentDatabaseDescriptor	*segdbDesc = NULL;
 	struct timeval	startTS;
+	char	   	*options = NULL;
+	char	   	*diff_options = NULL;
 	Gang	*newGangDefinition;
 	int		create_gang_retry_counter = 0;
 	int		in_recovery_mode_count = 0;
+	int		other_failures = 0;
 	int		successful_connections = 0;
 	int		poll_timeout = 0;
 	int		i = 0;
@@ -69,6 +72,8 @@ cdbgang_createGang_async(List *segments, SegmentType segmentType)
 
 	ELOG_DISPATCHER_DEBUG("createGang size = %d, segment type = %d", size, segmentType);
 	Assert(CurrentGangCreating == NULL);
+
+	makeOptions(&options, &diff_options);
 
 	/* If we're in a retry, we may need to reset our initial state, a bit */
 	newGangDefinition = NULL;
@@ -112,6 +117,7 @@ create_gang_retry:
 	Assert(newGangDefinition->size == size);
 	successful_connections = 0;
 	in_recovery_mode_count = 0;
+	other_failures = 0;
 	retry = false;
 
 	pollingStatus = palloc(sizeof(PostgresPollingStatusType) * size);
@@ -124,8 +130,6 @@ create_gang_retry:
 		{
 			bool		ret;
 			char		gpqeid[100];
-			char	   *options = NULL;
-			char	   *diff_options = NULL;
 
 			/*
 			 * Create the connection requests.	If we find a segment without a
@@ -159,8 +163,6 @@ create_gang_retry:
 				ereport(ERROR,
 						(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
 						 errmsg("failed to construct connectionstring")));
-
-			makeOptions(&options, &diff_options);
 
 			/* start connection in asynchronous way */
 			cdbconn_doConnectStart(segdbDesc, gpqeid, options, diff_options);
@@ -252,16 +254,43 @@ create_gang_retry:
 						if (segment_failure_due_to_recovery(PQerrorMessage(segdbDesc->conn)))
 						{
 							in_recovery_mode_count++;
+							/* Mark it as done, so we can consider retrying */
 							connStatusDone[i] = true;
 							elog(LOG, "segment is in reset/recovery mode (%s)", segdbDesc->whoami);
 						}
-						else
+						else if (segment_failure_due_to_missing_writer(PQerrorMessage(segdbDesc->conn)))
 						{
-							if (segment_failure_due_to_missing_writer(PQerrorMessage(segdbDesc->conn)))
-								markCurrentGxactWriterGangLost();
+							markCurrentGxactWriterGangLost();
 							ereport(ERROR, (errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
 											errmsg("failed to acquire resources on one or more segments"),
 											errdetail("%s (%s)", PQerrorMessage(segdbDesc->conn), segdbDesc->whoami)));
+						}
+#ifdef FAULT_INJECTOR
+						else if (segment_failure_due_to_fault_injector(PQerrorMessage(segdbDesc->conn)))
+						{
+							ereport(ERROR, (errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
+								errmsg("failed to acquire resources on one or more segments: fault injector"),
+								errdetail("%s (%s)", PQerrorMessage(segdbDesc->conn), segdbDesc->whoami)));
+						}
+#endif
+						else
+						{
+							/* Failed for some other reason */
+							if (gp_gang_creation_retry_count <= 0 ||
+								create_gang_retry_counter >= gp_gang_creation_retry_count)
+							{
+								/*
+								 * If we exhausted all of our retries, ERROR out
+								 * with the appropriate message.
+								 */
+								ereport(ERROR, (errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
+									errmsg("failed to acquire resources on one or more segments"),
+									errdetail("%s (%s)", PQerrorMessage(segdbDesc->conn), segdbDesc->whoami)));
+							}
+
+							/* Mark it as done, so we can consider retrying below */
+							connStatusDone[i] = true;
+							other_failures++;
 						}
 						break;
 
@@ -329,7 +358,7 @@ create_gang_retry:
 		/* some segments are in reset/recovery mode */
 		if (successful_connections != size)
 		{
-			Assert(successful_connections + in_recovery_mode_count == size);
+			Assert(successful_connections + in_recovery_mode_count + other_failures == size);
 
 			if (gp_gang_creation_retry_count <= 0 ||
 				create_gang_retry_counter++ >= gp_gang_creation_retry_count)

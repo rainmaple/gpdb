@@ -15,6 +15,7 @@
 #include "postgres.h"
 
 #include <limits.h>
+#include <dirent.h>
 
 #include "cdb/cdbvars.h"
 #include "miscadmin.h"
@@ -69,6 +70,7 @@ static void detect_component_dirs_v1(void);
 static void dump_component_dirs_v1(void);
 
 static void check_component_hierarchy_v1();
+static void reset_child_cpu_cfs_quota_us_v1();
 
 static void init_cpu_v1(void);
 static void init_cpuset_v1(void);
@@ -171,6 +173,12 @@ static int64 getcpuusage_v1(Oid group);
 static void getcpuset_v1(Oid group, char *cpuset, int len);
 static void setcpuset_v1(Oid group, const char *cpuset);
 static float convertcpuusage_v1(int64 usage, int64 duration);
+static List *parseio_v1(const char *io_limit);
+static void setio_v1(Oid group, List *limit_list);
+static void freeio_v1(List *limit_list);
+static List* getiostat_v1(Oid group, List *io_limit);
+static char *dumpio_v1(List *limit_list);
+static void cleario_v1(Oid groupid);
 
 /*
  * Detect gpdb cgroup component dirs.
@@ -392,6 +400,54 @@ check_component_hierarchy_v1()
 }
 
 /*
+ * Reset cpu.cfs_quota_us to -1 in all of child cgroups.
+ */
+static void
+reset_child_cpu_cfs_quota_us_v1()
+{
+	DIR *root_dir;
+	struct dirent *de;
+	struct stat statbuf;
+	char root_path[MAX_CGROUP_PATHLEN];
+	char dest_path[MAX_CGROUP_PATHLEN];
+	const char *component_name = getComponentName(CGROUP_COMPONENT_CPU);
+
+	Assert(cgroupSystemInfo->cgroup_dir[0] != 0);
+	/* build path /sys/fs/cgroup/cpu/gpdb/ */
+	snprintf(root_path, sizeof(root_path), "%s/%s/gpdb/",
+			 cgroupSystemInfo->cgroup_dir, component_name);
+	root_dir = opendir(root_path);
+	if (root_dir == NULL)
+		return;
+
+	while ((de = readdir(root_dir)) != NULL)
+	{
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+			continue;
+
+		/* sub directory */
+		snprintf(dest_path, sizeof(dest_path), "%s%s", root_path, de->d_name);
+
+		if (lstat(dest_path, &statbuf) < 0)
+		{
+			ereport(LOG,
+					(errcode_for_file_access(),
+					 errmsg("could not stat file \"%s\": %m", dest_path)));
+			continue;
+		}
+
+		if (S_ISDIR(statbuf.st_mode))
+		{
+			snprintf(dest_path, sizeof(dest_path), "%s%s/cpu.cfs_quota_us",
+					 root_path, de->d_name);
+			writeData(dest_path, "-1", strlen("-1"));
+		}
+	}
+
+	closedir(root_dir);
+}
+
+/*
  * Init gpdb cpu settings.
  */
 static void
@@ -400,6 +456,13 @@ init_cpu_v1(void)
 	CGroupComponentType component = CGROUP_COMPONENT_CPU;
 	int64		cfs_quota_us;
 	int64		shares;
+
+	/*
+	 * In cgroup v1, child cgroup's cfs_period_us should not larger than the
+	 * value of parent. So we sholud reset child cgroup's cfs_period_us first
+	 * to ensure that gpdb's root cgroup can be set successfully.
+	 */
+	reset_child_cpu_cfs_quota_us_v1();
 
 	/*
 	 * CGroup promises that cfs_quota_us will never be 0, however on centos6
@@ -539,9 +602,6 @@ probecgroup_v1(void)
 
 	detect_component_dirs_v1();
 
-	if (!normalPermissionCheck(permlists, CGROUP_ROOT_ID, false))
-		return false;
-
 	return true;
 }
 
@@ -646,11 +706,11 @@ createcgroup_v1(Oid group)
 {
 	int retry = 0;
 
-	if (!createDir(group, CGROUP_COMPONENT_CPU) ||
-		!createDir(group, CGROUP_COMPONENT_CPUACCT) ||
-		!createDir(group, CGROUP_COMPONENT_MEMORY) ||
+	if (!createDir(group, CGROUP_COMPONENT_CPU, "") ||
+		!createDir(group, CGROUP_COMPONENT_CPUACCT, "") ||
+		!createDir(group, CGROUP_COMPONENT_MEMORY, "") ||
 		(gp_resource_group_enable_cgroup_cpuset &&
-		 !createDir(group, CGROUP_COMPONENT_CPUSET)))
+		 !createDir(group, CGROUP_COMPONENT_CPUSET, "")))
 	{
 		CGROUP_ERROR("can't create cgroup for resource group '%d': %m", group);
 	}
@@ -699,7 +759,7 @@ create_default_cpuset_group_v1(void)
 	CGroupComponentType component = CGROUP_COMPONENT_CPUSET;
 	int retry = 0;
 
-	if (!createDir(DEFAULT_CPUSET_GROUP_ID, component))
+	if (!createDir(DEFAULT_CPUSET_GROUP_ID, component, ""))
 	{
 		CGROUP_ERROR("can't create cpuset cgroup for resgroup '%d': %m",
 					 DEFAULT_CPUSET_GROUP_ID);
@@ -961,7 +1021,7 @@ unlockcgroup_v1(int fd)
 /*
  * Set the cpu hard limit for the OS group.
  *
- * cpu_hard_quota_limit should be within [-1, 100].
+ * cpu_max_percent should be within [-1, 100].
  */
 static void
 setcpulimit_v1(Oid group, int cpu_hard_limit)
@@ -970,9 +1030,8 @@ setcpulimit_v1(Oid group, int cpu_hard_limit)
 
 	if (cpu_hard_limit > 0)
 	{
-		int64 periods = get_cfs_period_us_v1(component);
 		writeInt64(group, BASEDIR_GPDB, component, "cpu.cfs_quota_us",
-				   periods * cgroupSystemInfoV1.ncores * cpu_hard_limit / 100);
+				   system_cfs_quota_us * cpu_hard_limit * gp_resource_group_cpu_limit / 100);
 	}
 	else
 	{
@@ -981,13 +1040,13 @@ setcpulimit_v1(Oid group, int cpu_hard_limit)
 }
 
 /*
- * Set the cpu soft priority for the OS group.
+ * Set the cpu weight for the OS group.
  *
  * For version 1, the default value of cpu.shares is 1024, corresponding to
- * our cpu_soft_priority, which default value is 100, so we need to adjust it.
+ * our cpu_weight, which default value is 100, so we need to adjust it.
  */
 static void
-setcpupriority_v1(Oid group, int shares)
+setcpuweight_v1(Oid group, int shares)
 {
 	CGroupComponentType component = CGROUP_COMPONENT_CPU;
 	writeInt64(group, BASEDIR_GPDB, component,
@@ -1105,6 +1164,63 @@ getmemoryusage_v1(Oid group)
 	return readInt64(group, BASEDIR_GPDB, component, "memory.usage_in_bytes");
 }
 
+static List *
+parseio_v1(const char *io_limit)
+{
+	if (io_limit == NULL)
+		return NIL;
+
+	if (strcmp(io_limit, DefaultIOLimit) == 0)
+		return NIL;
+
+	ereport(WARNING,
+			(errcode(ERRCODE_SYSTEM_ERROR),
+			errmsg("resource group io limit only can be used in cgroup v2.")));
+	return NIL;
+}
+
+static void
+setio_v1(Oid group, List *limit_list)
+{
+	ereport(WARNING,
+			(errcode(ERRCODE_SYSTEM_ERROR),
+			 errmsg("resource group io limit only can be used in cgroup v2.")));
+}
+
+static void
+freeio_v1(List *limit_list)
+{
+	ereport(WARNING,
+			(errcode(ERRCODE_SYSTEM_ERROR),
+			 errmsg("resource group io limit only can be used in cgroup v2.")));
+}
+
+static List *
+getiostat_v1(Oid group, List *io_limit)
+{
+	ereport(WARNING,
+			(errcode(ERRCODE_SYSTEM_ERROR),
+			 errmsg("resource group io limit only can be used in cgroup v2.")));
+	return NIL;
+}
+
+static char *
+dumpio_v1(List *limit_list)
+{
+	ereport(WARNING,
+			(errcode(ERRCODE_SYSTEM_ERROR),
+			 errmsg("resource group io limit only can be used in cgroup v2.")));
+	return DefaultIOLimit;
+}
+
+static void
+cleario_v1(Oid groupid)
+{
+	ereport(WARNING,
+			(errcode(ERRCODE_SYSTEM_ERROR),
+			 errmsg("resource group io limit only can be used in cgroup v2.")));
+}
+
 static CGroupOpsRoutine cGroupOpsRoutineV1 = {
 		.getcgroupname = getcgroupname_v1,
 		.probecgroup = probecgroup_v1,
@@ -1122,13 +1238,20 @@ static CGroupOpsRoutine cGroupOpsRoutineV1 = {
 
 		.setcpulimit = setcpulimit_v1,
 		.getcpuusage = getcpuusage_v1,
-		.setcpupriority = setcpupriority_v1,
+		.setcpuweight = setcpuweight_v1,
 		.getcpuset = getcpuset_v1,
 		.setcpuset = setcpuset_v1,
 
 		.convertcpuusage = convertcpuusage_v1,
 
 		.getmemoryusage = getmemoryusage_v1,
+
+		.parseio = parseio_v1,
+		.setio = setio_v1,
+		.freeio = freeio_v1,
+		.getiostat = getiostat_v1,
+		.dumpio = dumpio_v1,
+		.cleario = cleario_v1
 };
 
 CGroupOpsRoutine *get_group_routine_v1(void)

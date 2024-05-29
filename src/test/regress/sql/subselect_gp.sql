@@ -1,3 +1,10 @@
+-- start_matchsubs
+-- m/\(cost=.*\)/
+-- s/\(cost=.*\)//
+--
+-- m/\(slice.*\)/
+-- s/\(slice.*\)//
+-- end_matchsubs
 -- start_ignore
 create schema subselect_gp;
 set search_path to subselect_gp, public;
@@ -673,9 +680,6 @@ SELECT bar_s.c FROM bar_s, foo_s WHERE foo_s.b = (SELECT max(i) FROM baz_s WHERE
 
 -- Same as above, but with another subquery, so it must use a SubPlan. There
 -- are two references to the same SubPlan in the plan, on different slices.
--- GPDB_96_MERGE_FIXME: this EXPLAIN output should become nicer-looking once we
--- merge upstream commit 4d042999f9, to suppress the SubPlans from being
--- printed twice.
 explain SELECT bar_s.c FROM bar_s, foo_s WHERE foo_s.b = (SELECT max(i) FROM baz_s WHERE bar_s.c = 9) AND foo_s.b = (select bar_s.d::int4);
 SELECT bar_s.c FROM bar_s, foo_s WHERE foo_s.b = (SELECT max(i) FROM baz_s WHERE bar_s.c = 9) AND foo_s.b = (select bar_s.d::int4);
 
@@ -782,10 +786,8 @@ EXPLAIN select count(distinct ss.ten) from
    where unique1 IN (select distinct hundred from tenk1 b)) ss;
 
 --
--- In case of simple exists query, planner can generate alternative
--- subplans and choose one of them during execution based on the cost.
--- The below test check that we are generating alternative subplans,
--- we should see 2 subplans in the explain
+-- Commit 41efb83 remove unused subplans in planner stage, it
+-- will shows only the subplan actually be used.
 --
 EXPLAIN SELECT EXISTS(SELECT * FROM tenk1 WHERE tenk1.unique1 = tenk2.unique1) FROM tenk2 LIMIT 1;
 
@@ -1340,3 +1342,140 @@ explain (costs off) select * from r where b in (select b from s where c=10 order
 select * from r where b in (select b from s where c=10 order by c);
 explain (costs off) select * from r where b in (select b from s where c=10 order by c limit 2);
 select * from r where b in (select b from s where c=10 order by c limit 2);
+
+-- Test nested query with aggregate inside a sublink,
+-- ORCA should correctly normalize the aggregate expression inside the
+-- sublink's nested query and the column variable accessed in aggregate should
+-- be accessible to the aggregate after the normalization of query.
+-- If the query is not supported, ORCA should gracefully fallback to postgres
+explain (COSTS OFF) with t0 AS (
+    SELECT
+       ROW_TO_JSON((SELECT x FROM (SELECT max(t.b)) x))
+       AS c
+    FROM r
+        JOIN s ON true
+        JOIN s as t ON  true
+   )
+SELECT c FROM t0;
+
+-- Test push predicate into subquery
+-- more details could be found at https://github.com/greenplum-db/gpdb/issues/8429
+CREATE TABLE foo_predicate_pushdown (a int, b  int);
+CREATE TABLE bar_predicate_pushdown (c int, d int);
+explain (costs off) select * from (   
+ select distinct (select bar.c from bar_predicate_pushdown bar where c = foo.b) as ss from foo_predicate_pushdown foo
+) ABC where ABC.ss = 5;
+DROP TABLE foo_predicate_pushdown;
+DROP TABLE bar_predicate_pushdown;
+
+--
+-- Test case for ORCA semi join with random table
+-- See https://github.com/greenplum-db/gpdb/issues/16611
+--
+--- case for random distribute 
+create table table_left (l1 int, l2 int) distributed by (l1);
+create table table_right (r1 int, r2 int) distributed randomly;
+create index table_right_idx on table_right(r1);
+insert into table_left values (1,1);
+insert into table_right select i, i from generate_series(1, 300) i;
+insert into table_right select 1, 1 from generate_series(1, 100) i;
+
+--- make sure the same value (1,1) rows are inserted into different segments
+select count(distinct gp_segment_id) > 1 from table_right where r1 = 1;
+analyze table_left;
+analyze table_right;
+
+-- two types of semi join tests
+explain (costs off) select * from table_left where exists (select 1 from table_right where l1 = r1);
+select * from table_left where exists (select 1 from table_right where l1 = r1);
+explain (costs off) select * from table_left where l1 in (select r1 from table_right);
+select * from table_left where exists (select 1 from table_right where l1 = r1);
+
+--- case for replicate distribute
+alter table table_right set distributed replicated;
+explain (costs off) select * from table_left where exists (select 1 from table_right where l1 = r1);
+select * from table_left where exists (select 1 from table_right where l1 = r1);
+explain (costs off) select * from table_left where l1 in (select r1 from table_right);
+select * from table_left where exists (select 1 from table_right where l1 = r1);
+
+--- case for partition table with random distribute
+drop table table_right;
+create table table_right (r1 int, r2 int) distributed randomly partition by range (r1) ( start (0) end (300) every (100));
+create index table_right_idx on table_right(r1);
+insert into table_right select i, i from generate_series(1, 299) i;
+insert into table_right select 1, 1 from generate_series(1, 100) i;
+analyze table_right;
+explain (costs off) select * from table_left where exists (select 1 from table_right where l1 = r1);
+select * from table_left where exists (select 1 from table_right where l1 = r1);
+explain (costs off) select * from table_left where l1 in (select r1 from table_right);
+select * from table_left where exists (select 1 from table_right where l1 = r1);
+
+-- clean up
+drop table table_left;
+drop table table_right;
+-- test cross params of initplan
+-- https://github.com/greenplum-db/gpdb/issues/16268
+create table tmp (a varchar, b varchar, c varchar);
+select (SELECT EXISTS
+                 (SELECT
+                  FROM pg_views
+                  WHERE schemaname = a)) from tmp;
+drop table tmp;
+
+-- Test LEAST() and GREATEST() with an embedded subquery
+drop table if exists foo;
+
+create table foo (a int, b int) distributed by(a);
+insert into foo values (1, 2), (2, 3), (3, 4);
+analyze foo;
+
+explain (costs off) select foo.a from foo where foo.a <= LEAST(foo.b, (SELECT 1), NULL);
+select foo.a from foo where foo.a <= LEAST(foo.b, (SELECT 1), NULL);
+
+explain (costs off) select foo.a from foo where foo.a <= GREATEST(foo.b, (SELECT 1), NULL);
+select foo.a from foo where foo.a <= GREATEST(foo.b, (SELECT 1), NULL);
+
+explain (costs off) select least((select 5), greatest(b, NULL, (select 1)), a) from foo;
+select least((select 5), greatest(b, NULL, (select 1)), a) from foo;
+
+drop table foo;
+-- Test subquery within ScalarArrayRef or ScalarArrayRefIndexList
+drop table if exists bar;
+
+create table bar (a int[], b int[][]) distributed by(a);
+insert into bar values (ARRAY[1, 2, 3], ARRAY[[1, 2, 3], [4, 5, 6]]);
+analyze bar;
+
+explain (costs off) select (select a from bar)[1] from bar;
+select (select a from bar)[1] from bar;
+
+explain (costs off) select (select a from bar)[(select 1)] from bar;
+select (select a from bar)[(select 1)] from bar;
+
+explain (costs off) select (select b from bar)[1][1:3] from bar;
+select (select b from bar)[1][1:3] from bar;
+
+explain (costs off) select (select b from bar)[(select 1)][1:3] from bar;
+select (select b from bar)[(select 1)][1:3] from bar;
+drop table bar;
+
+create table outer_foo(a int primary key, b int);
+create table inner_bar(a int, b int) distributed randomly;
+insert into outer_foo values (generate_series(1,20), generate_series(11,30));
+insert into inner_bar values (generate_series(1,20), generate_series(25,44));
+set optimizer to off;
+explain (costs off) select t1.a from outer_foo t1,  LATERAL(SELECT  distinct t2.a from inner_bar t2 where t1.b=t2.b) q order by 1;
+explain (costs off) select t1.a from outer_foo t1,  LATERAL(SELECT  distinct t2.a from inner_bar t2 where t1.b=t2.b) q;
+select t1.a from outer_foo t1,  LATERAL(SELECT  distinct t2.a from inner_bar t2 where t1.b=t2.b) q order by 1;
+
+create table t(a int, b int);
+explain (costs off) with cte(x) as (select t1.a from outer_foo t1, LATERAL(SELECT distinct t2.a from inner_bar t2 where t1.b=t2.b) q order by 1)
+select * from t where a > (select count(1) from cte where x > t.a + random());
+
+with cte(x) as (select t1.a from outer_foo t1, LATERAL(SELECT distinct t2.a from inner_bar t2 where t1.b=t2.b) q order by 1)
+select * from t where a > (select count(1) from cte where x > t.a + random());
+
+reset optimizer;
+drop table outer_foo;
+drop table inner_bar;
+drop table t;

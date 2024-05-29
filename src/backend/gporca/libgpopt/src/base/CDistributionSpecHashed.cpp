@@ -113,7 +113,15 @@ CDistributionSpecHashed::PopulateDefaultOpfamilies()
 		IMDId *mdid_type = CScalar::PopConvert(expr->Pop())->MdidType();
 		IMDId *mdid_opfamily =
 			mda->RetrieveType(mdid_type)->GetDistrOpfamilyMdid();
-		GPOS_ASSERT(nullptr != mdid_opfamily && mdid_opfamily->IsValid());
+		if (nullptr == mdid_opfamily || !mdid_opfamily->IsValid())
+		{
+			// For a data type the retrieved opfamily can be 'InvalidOid'.
+			// Eg - For 'json', the distribution opfamily is 'InvalidOid'.
+			// Using an InvalidOid can lead to crash.
+			m_opfamilies->Release();
+			m_opfamilies = nullptr;
+			return;
+		}
 		mdid_opfamily->AddRef();
 		m_opfamilies->Append(mdid_opfamily);
 	}
@@ -173,20 +181,6 @@ CDistributionSpecHashed::StripEquivColumns(CMemoryPool *mp)
 		CDistributionSpecHashed(m_pdrgpexpr, m_fNullsColocated, m_opfamilies);
 }
 
-
-BOOL
-CDistributionSpecHashed::FDistributionSpecHashedOnlyOnGpSegmentId() const
-{
-	const ULONG length = m_pdrgpexpr->Size();
-	COperator *pop = (*(m_pdrgpexpr))[0]->Pop();
-
-	return length == 1 && pop->Eopid() == COperator::EopScalarIdent &&
-		   CScalarIdent::PopConvert(pop)->Pcr()->IsSystemCol() &&
-		   CScalarIdent::PopConvert(pop)->Pcr()->Name().Equals(
-			   CDXLTokens::GetDXLTokenStr(EdxltokenGpSegmentIdColName));
-}
-
-
 //---------------------------------------------------------------------------
 //	@function:
 //		CDistributionSpecHashed::FSatisfies
@@ -209,9 +203,10 @@ CDistributionSpecHashed::FSatisfies(const CDistributionSpec *pds) const
 		return true;
 	}
 
-	if (EdtAny == pds->Edt() || EdtNonSingleton == pds->Edt())
+	if (EdtAny == pds->Edt() || EdtNonSingleton == pds->Edt() ||
+		EdtNonReplicated == pds->Edt())
 	{
-		// hashed distribution satisfies the "any" and "non-singleton" distribution requirement
+		// hashed distribution satisfies the "any", "non-singleton", and "non-replicated" distribution requirement
 		return true;
 	}
 
@@ -224,24 +219,6 @@ CDistributionSpecHashed::FSatisfies(const CDistributionSpec *pds) const
 
 	const CDistributionSpecHashed *pdsHashed =
 		dynamic_cast<const CDistributionSpecHashed *>(pds);
-
-	// Assumes that 'this' distribution spec is based on the underlying table
-	// structure, whereas 'pds' distribution spec is based on the query
-	// structure. Given that table based distribution spec is derived from
-	// distribution columns, 'this' distribution spec should never satisfy
-	// FDistributionSpecHashedOnlyOnGpSegmentId().
-	if (pdsHashed->FDistributionSpecHashedOnlyOnGpSegmentId())
-	{
-		// If there exist HashSpecEquivExprs(), then we deny the match in order
-		// to prevent incorrectly removing a REDISTRIBUTE MOTION. For example,
-		// in the following query:
-		//
-		// SELECT * FROM t t1, t t2 WHERE t1.gp_segment_id=t2.id;
-		if (nullptr == pdsHashed->HashSpecEquivExprs())
-		{
-			return true;
-		}
-	}
 
 	return FMatchSubset(pdsHashed);
 }
@@ -993,10 +970,7 @@ CDistributionSpecHashed *
 CDistributionSpecHashed::Combine(CMemoryPool *mp,
 								 CDistributionSpecHashed *other_spec)
 {
-	if (nullptr == other_spec)
-	{
-		return this;
-	}
+	GPOS_ASSERT(nullptr != other_spec);
 
 	CDistributionSpecHashed *combined_spec = other_spec->Copy(mp);
 	CDistributionSpecHashed *prev = nullptr, *next = nullptr;

@@ -50,13 +50,13 @@ CLogicalDynamicForeignGet::CLogicalDynamicForeignGet(
 	CMemoryPool *mp, const CName *pnameAlias, CTableDescriptor *ptabdesc,
 	ULONG ulPartIndex, CColRefArray *pdrgpcrOutput,
 	CColRef2dArray *pdrgpdrgpcrPart, IMdIdArray *partition_mdids,
-	OID foreign_server_oid, BOOL is_coordinator_only)
+	OID foreign_server_oid, IMDRelation::Ereldistrpolicy exec_location)
 
 
 	: CLogicalDynamicGetBase(mp, pnameAlias, ptabdesc, ulPartIndex,
 							 pdrgpcrOutput, pdrgpdrgpcrPart, partition_mdids),
 	  m_foreign_server_oid(foreign_server_oid),
-	  m_is_coordinator_only(is_coordinator_only)
+	  m_exec_location(exec_location)
 {
 }
 
@@ -107,14 +107,14 @@ CLogicalDynamicForeignGet::PopCopyWithRemappedColumns(
 											 colref_mapping, must_exist);
 	}
 	CColRef2dArray *pdrgpdrgpcrPart =
-		PdrgpdrgpcrCreatePartCols(mp, pdrgpcrOutput, m_ptabdesc->PdrgpulPart());
+		PdrgpdrgpcrCreatePartCols(mp, pdrgpcrOutput, Ptabdesc()->PdrgpulPart());
 	CName *pnameAlias = GPOS_NEW(mp) CName(mp, *m_pnameAlias);
-	m_ptabdesc->AddRef();
+	Ptabdesc()->AddRef();
 	m_partition_mdids->AddRef();
 
 	return GPOS_NEW(mp) CLogicalDynamicForeignGet(
-		mp, pnameAlias, m_ptabdesc, m_scan_id, pdrgpcrOutput, pdrgpdrgpcrPart,
-		m_partition_mdids, m_foreign_server_oid, m_is_coordinator_only);
+		mp, pnameAlias, Ptabdesc(), m_scan_id, pdrgpcrOutput, pdrgpdrgpcrPart,
+		m_partition_mdids, m_foreign_server_oid, m_exec_location);
 }
 
 //---------------------------------------------------------------------------
@@ -143,7 +143,7 @@ CLogicalDynamicForeignGet::PstatsDerive(CMemoryPool *mp,
 {
 	// requesting stats on distribution columns to estimate data skew
 	IStatistics *pstatsTable =
-		PstatsBaseTable(mp, exprhdl, m_ptabdesc, m_pcrsDist);
+		PstatsBaseTable(mp, exprhdl, Ptabdesc(), m_pcrsDist);
 
 	CColRefSet *pcrs = GPOS_NEW(mp) CColRefSet(mp, m_pdrgpcrOutput);
 	CUpperBoundNDVs *upper_bound_NDVs =

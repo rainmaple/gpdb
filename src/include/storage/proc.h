@@ -224,8 +224,18 @@ struct PGPROC
 	void		*resSlot;	/* the resource group slot granted.
 							 * NULL indicates the resource group is
 							 * locked for drop. */
-	void		*movetoResSlot; /* the resource group slot move to, valid only on QD */
-	Oid			movetoGroupId;  /* the resource group id move to */
+	slock_t		movetoMutex; /* spinlock to protect moveto* fields below */
+	void		*movetoResSlot; /* the resource group slot move to, valid only
+								 * on QD; when slot become NULL, it means
+								 * target process got the control over it */
+	Oid 		movetoGroupId;  /* the resource group id move to; valid on
+								 * both QE and QD; when id become InvalidOid
+								 * on QD, it means target process attempted to
+								 * move process to this group and the result
+								 * of attemption is in movetoResSlot */
+	pid_t		movetoCallerPid; /* pid of moving initiator; valid only on QD;
+								  * guards current moving command from another
+								  * commands */
 
 	/* Support for group XID clearing. */
 	/* true, if member of ProcArray group waiting for XID clear */
@@ -361,11 +371,11 @@ extern PGPROC *PreparedXactProcs;
  * We set aside some extra PGPROC structures for auxiliary processes,
  * ie things that aren't full-fledged backends but need shmem access.
  *
- * Background writer, checkpointer and WAL writer run during normal operation.
- * Startup process and WAL receiver also consume 2 slots, but WAL writer is
- * launched only after startup has exited, so we only need 4 slots.
+ * Background writer, checkpointer, WAL writer and archiver run during normal
+ * operation.  Startup process and WAL receiver also consume 2 slots, but WAL
+ * writer is launched only after startup has exited, so we only need 5 slots.
  */
-#define NUM_AUXILIARY_PROCS		4
+#define NUM_AUXILIARY_PROCS		5
 
 /* configurable options */
 extern PGDLLIMPORT int DeadlockTimeout;

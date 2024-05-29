@@ -7,7 +7,7 @@ This tool collects Greenplum and system log files, along with the relevant confi
 ```
 gpsupport gp_log_collector [-failed-segs | -c <ID1,ID2,...>| -hostfile <file> | -h <host1, host2,...>]
 [ -start <YYYY-MM-DD> ] [ -end <YYYY-MM-DD> ]
-[ -dir <path> ] [ -segdir <path> ] [ -a ] [-skip-coordinator] [-with-gpbackup] [-with-gptext] [-with-gptext-only] [-with-gpcc] [-with-gpss] [-gpss_logdir <gpss_log_directory>] [-with-pxf] [-with-pxf-only] [-with-gpupgrade]
+[ -dir <path> ] [ -segdir <path> ] [ -a ] [-skip-coordinator] [-with-gpbackup] [-with-gptext] [-with-gptext-only] [-with-gpss] [-gpss_logdir <gpss_log_directory>] [-with-pxf] [-with-pxf-only] [-with-gpupgrade] [-with-gpdr-primary] [-with-gpdr-recovery]
 ```
 
 ## <a id="opts"></a>Options 
@@ -72,15 +72,6 @@ Also, the `pg_log` file is collected from the coordinator and segment hosts.
 -with-gptext-only
 :   Collect only GPText logs.
 
--with-gpcc
-:   Collect log files related to Greenplum Command Center. Log files are collected from the following locations:
-
-- `$GPCC_HOME/logs/*`
-- `$GPCC_HOME/conf/app.conf`
-- `$HOME/gpmetrics/*` (Greenplum Command Center 6.8.0 and later on Greenplum Database 6.x or Greenplum Command Center 4.16.0 and later on Greenplum Database 5.x)
-- `$COORDINATOR_DATA_DIRECTORY/gpmetrics` (Greenplum Command Center 6.7.0 and earlier on Greenplum Database 6.x or Greenplum Command Center 4.15.0 and earlier on Greenplum Database 5.x)
-- The output of the `gppkg -q --all` command
-
 -with-gpss 
 :  Collect log files related to Greenplum Streaming Server. If you do not specify a directory with the `-gpsslogdir` option, gpsupport collects logs from the `gpAdminLogs` directory. Log files are of the format `gpss_<date>.log`.
 
@@ -93,8 +84,14 @@ Also, the `pg_log` file is collected from the coordinator and segment hosts.
 -with-gpupgrade
 :   Collect all `gpupgrade` logs along with Greenplum logs.
 
+-with-gpdr-primary
+:   Collect all logs relevant for a Greenplum Disaster Recovery primary cluster, along with Greenplum logs.
 
-> **Note** Hostnames provided through `-hostfile` or `-h` must match the hostname column in `gp_segment_configuration`.
+-with-gpdr-recovery
+: Collect all logs relevant for a Greenplum Disaster Recovery recovery cluster, along with Greenplum logs.
+
+> **Note**:
+> Hostnames provided through `-hostfile` or `-h` must match the hostname column in `gp_segment_configuration`.
 
 The tool also collects the following information:
 
@@ -107,8 +104,10 @@ The tool also collects the following information:
 | GPText files | <ul><li>Installation configuration file: `$GPTXTHOME/lib/python/gptextlib/consts.py` </li><li>`gptext-state -D`</li><li>`<gptext data dir>/solr*/solr.in`</li><li>`<gptext data dir>/solr*/log4j.properties`</li><li>`<gptext data dir>/zoo*/logs/*`</li><li>`commands/bash/-c_echo $PATH`</li><li>`commands/bash/-c_ps -ef | grep solr`</li><li>`commands/bash/-c_ps -ef | grep zookeeper`</li></ul> |
 | PXF files | <ul><li>`pxf cluster status`</li><li>`pxf status`</li><li>PXF version</li><li>`Logs/`</li><li>`CONF/`</li><li>`Run/`</li></ul> |
 | gpupgrade files | <ul><li>`~/gpAdminLogs` on all hosts</li><li>`$HOME/gpupgrade` on coordinator host</li><li>`$HOME/.gpupgrade` on all hosts</li><li>Source cluster's `pg_log` files located in `$COORDINATOR_DATA_DIRECTORY/pg_log` on coordinator host</li><li>Target cluster's `pg_log` files located in `$(gpupgrade config show --target-datadir)/pg_log` on coordinator host</li><li>Target cluster's coordinator data directory</li></ul> |
+| Greenplum Disaster Recovery files | <ul><li>GPDB pg_logs</li><li>`gpdr_YYYYMMDD.log` files in gpAdminLogs</li><li>GPDR config files in `$GPDR_HOME/configs/`</li><li>GPDR pgbackrest log files in `$GPDR_HOME/logs/`</li><li>GPDR state files in `$GPDR_HOME/state/`</li></ul> |
 
-> **Note** Some commands might not be able to be run if user does not have the correct permissions.
+> **Note**:
+> Some commands might not be able to be run if user does not have the correct permissions.
 
 ## <a id="exs"></a>Examples 
 
@@ -128,6 +127,12 @@ Collect logs from host `sdw2.gpdb.local` between 2016-03-21 and 2016-03-23:
 
 ```
 gpsupport gp_log_collector -failed-segs -start 2016-03-21 -end 2016-03-21
+```
+
+Collect logs from host `sdw2.gpdb.local` between 2023-06-07 07:21 and 2023-06-07 07:24:
+
+```
+ gpsupport gp_log_collector -start 2023-06-07 07:21 -end 2023-06-07 07:24
 ```
 
 Collect only GPText logs for all segments, without any Greenplum logs:

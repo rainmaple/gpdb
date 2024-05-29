@@ -28,7 +28,8 @@ extern void cdb_create_multistage_grouping_paths(PlannerInfo *root,
 												 const AggClauseCosts *agg_final_costs,
 												 List *rollups,
 												 List *new_rollups,
-												 AggStrategy strat);
+												 AggStrategy strat,
+												 GroupPathExtraData *extra);
 
 
 extern void cdb_create_twostage_distinct_paths(PlannerInfo *root,
@@ -51,5 +52,10 @@ extern Path *cdb_prepare_path_for_hashed_agg(PlannerInfo *root,
 											 PathTarget *target,
 											 List *groupClause,
 											 List *rollups);
-
+extern List *get_common_group_tles(PathTarget *target,
+								   List *groupClause,
+								   List *rollups);
+extern CdbPathLocus choose_grouping_locus(PlannerInfo *root, Path *path,
+										  List *group_tles,
+										  bool *need_redistribute_p);
 #endif   /* CDBGROUPINGPATHS_H */

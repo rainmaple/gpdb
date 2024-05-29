@@ -1292,6 +1292,16 @@ SetupTCPInterconnect(EState *estate)
 	interconnect_context->doSendStopMessage = doSendStopMessageTCP;
 
 #ifdef ENABLE_IC_PROXY
+	/* check if current Segment's ICProxy listener failed */
+	if (pg_atomic_read_u32(ic_proxy_peer_listener_failed) > 0)
+	{
+		ereport(ERROR,
+			(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
+			 errmsg("Failed to setup ic_proxy interconnect"),
+			 errdetail("The ic_proxy process failed to bind or listen."),
+			 errhint("Please check the server log for related WARNING messages.")));
+	}
+
 	ic_proxy_backend_init_context(interconnect_context);
 #endif /* ENABLE_IC_PROXY */
 
@@ -1669,29 +1679,26 @@ SetupTCPInterconnect(EState *estate)
 		/*
 		 * Log the select() if requested.
 		 */
-		if (gp_log_interconnect >= GPVARS_VERBOSITY_VERBOSE)
+		if (gp_log_interconnect >= GPVARS_VERBOSITY_DEBUG ||
+			(gp_log_interconnect >= GPVARS_VERBOSITY_VERBOSE &&
+			 n != expectedTotalIncoming + expectedTotalOutgoing))
 		{
-			if (gp_log_interconnect >= GPVARS_VERBOSITY_DEBUG ||
-				n != expectedTotalIncoming + expectedTotalOutgoing)
-			{
-				int			elevel = (n == expectedTotalIncoming + expectedTotalOutgoing)
-				? DEBUG1 : LOG;
+			int elevel = (gp_log_interconnect >= GPVARS_VERBOSITY_DEBUG) ? DEBUG1 : LOG;
 
-				initStringInfo(&logbuf);
-				if (n > 0)
-				{
-					appendStringInfo(&logbuf, "result=%d  Ready: ", n);
-					format_fd_set(&logbuf, highsock + 1, &rset, "r={", "} ");
-					format_fd_set(&logbuf, highsock + 1, &wset, "w={", "} ");
-					format_fd_set(&logbuf, highsock + 1, &eset, "e={", "}");
-				}
-				else
-					appendStringInfoString(&logbuf, n < 0 ? "error" : "timeout");
-				ereport(elevel, (errmsg("SetupInterconnect+" UINT64_FORMAT "ms:   select()  %s",
-										elapsed_ms, logbuf.data)));
-				pfree(logbuf.data);
-				MemSet(&logbuf, 0, sizeof(logbuf));
+			initStringInfo(&logbuf);
+			if (n > 0)
+			{
+				appendStringInfo(&logbuf, "result=%d  Ready: ", n);
+				format_fd_set(&logbuf, highsock + 1, &rset, "r={", "} ");
+				format_fd_set(&logbuf, highsock + 1, &wset, "w={", "} ");
+				format_fd_set(&logbuf, highsock + 1, &eset, "e={", "}");
 			}
+			else
+				appendStringInfoString(&logbuf, n < 0 ? "error" : "timeout");
+			ereport(elevel, (errmsg("SetupInterconnect+" UINT64_FORMAT "ms:   select()  %s",
+									elapsed_ms, logbuf.data)));
+			pfree(logbuf.data);
+			MemSet(&logbuf, 0, sizeof(logbuf));
 		}
 
 		/* An error other than EINTR is not acceptable */
@@ -2648,8 +2655,6 @@ RecvTupleChunkFromAnyTCP(ChunkTransportState *transportStates,
 
 		}
 
-		// GPDB_12_MERGE_FIXME: should use WaitEventSetWait() instead of select()
-		// follow the routine in ic_udpifc.c
 		n = select(nfds + 1, (fd_set *) &rset, NULL, NULL, &timeout);
 		if (n < 0)
 		{

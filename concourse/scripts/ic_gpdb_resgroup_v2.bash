@@ -16,11 +16,11 @@ enable_cgroup_subtree_control() {
     local gpdb_host_alias=$1
     local basedir=$CGROUP_BASEDIR
 
-    ssh -t $gpdb_host_alias sudo bash -ex <<EOF
+    ssh $gpdb_host_alias sudo -n bash -ex <<EOF
         chmod -R 777 $basedir/
-        echo "+cpu" >> $basedir/cgroup.subtree_control
-        echo "+cpuset" >> $basedir/cgroup.subtree_control
-        echo "+memory" >> $basedir/cgroup.subtree_control
+        # create required cgroup controllers (cpu cpuset io memory) via a transient service,
+        # this can avoid systemd from trimming unused controllers before gpdb startup.
+        systemd-run --unit=cgroup-holder --service=oneshot -r -p Delegate=yes true
         mkdir $basedir/gpdb
         chmod -R 777 $basedir/gpdb
 EOF
@@ -37,9 +37,9 @@ run_resgroup_test() {
         export CPPFLAGS="-I\${GPHOME}/include"
 
         cd /home/gpadmin/gpdb_src
-        PYTHON=python3 ./configure --prefix=/usr/local/greenplum-db-devel \
+        PYTHON=python3.11 ./configure --prefix=/usr/local/greenplum-db-devel \
             --without-zlib --without-rt --without-libcurl \
-            --without-libedit-preferred --without-docdir --without-readline \
+            --without-libedit-preferred --without-readline \
             --disable-gpcloud --disable-gpfdist --disable-orca \
             --without-python PKG_CONFIG_PATH="\${GPHOME}/lib/pkgconfig" ${CONFIGURE_FLAGS}
 

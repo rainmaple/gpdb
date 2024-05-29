@@ -717,9 +717,6 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 	/*
 	 * release bitmaps and buffers if any
 	 */
-	/* GPDB: release the iterators before closing down subplans, because
-	 * the bitmap is owned by the BitmapIndex scan.
-	 */
 	if (node->tbmiterator)
 		tbm_generic_end_iterate(node->tbmiterator);
 	if (node->prefetch_iterator)
@@ -877,7 +874,7 @@ ExecInitBitmapHeapScanForPartition(BitmapHeapScan *node, EState *estate, int efl
 	}
 
 	/* Prefetching hasn't been implemented for AO tables */
-	if (RelationIsAppendOptimized(currentRelation))
+	if (RelationStorageIsAO(currentRelation))
 		scanstate->prefetch_maximum = 0;
 
 	scanstate->ss.ss_currentRelation = currentRelation;

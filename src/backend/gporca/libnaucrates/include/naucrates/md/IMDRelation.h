@@ -58,6 +58,18 @@ public:
 
 	//-------------------------------------------------------------------
 	//	@doc:
+	//		Append-only table version (if append-only table)
+	//-------------------------------------------------------------------
+	enum Erelaoversion
+	{
+		AORelationVersion_None,
+		AORelationVersion_GP6,
+		AORelationVersion_GP7,
+		MaxAORelationVersion
+	};
+
+	//-------------------------------------------------------------------
+	//	@doc:
 	//		Distribution policy of a relation
 	//-------------------------------------------------------------------
 	enum Ereldistrpolicy
@@ -66,6 +78,7 @@ public:
 		EreldistrHash,
 		EreldistrRandom,
 		EreldistrReplicated,
+		EreldistrUniversal,
 		EreldistrSentinel
 	};
 
@@ -89,11 +102,21 @@ public:
 		return EmdtRel;
 	}
 
+	// Gets current cluster's append-only table version
+	static Erelaoversion
+	GetCurrentAOVersion()
+	{
+		return static_cast<Erelaoversion>(MaxAORelationVersion - 1);
+	}
+
 	// is this a temp relation
 	virtual BOOL IsTemporary() const = 0;
 
 	// storage type (heap, appendonly, ...)
 	virtual Erelstoragetype RetrieveRelStorageType() const = 0;
+
+	// append only table version
+	virtual Erelaoversion GetRelAOVersion() const = 0;
 
 	// distribution policy (none, hash, random)
 	virtual Ereldistrpolicy GetRelDistribution() const = 0;
@@ -197,6 +220,9 @@ public:
 
 	// get oid of foreign server for foreign table
 	virtual IMDId *ForeignServer() const = 0;
+
+	// rows
+	virtual CDouble Rows() const = 0;
 };
 
 // common structure over relation and external relation metadata for index info

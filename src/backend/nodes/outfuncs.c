@@ -43,6 +43,7 @@
 #include "utils/datum.h"
 #include "utils/rel.h"
 
+#include "cdb/cdbaocsam.h"
 #include "cdb/cdbgang.h"
 #include "nodes/altertablenodes.h"
 
@@ -519,8 +520,6 @@ _outJoinPlanInfo(StringInfo str, const Join *node)
 	_outPlanInfo(str, (const Plan *) node);
 
 	WRITE_BOOL_FIELD(prefetch_inner);
-	WRITE_BOOL_FIELD(prefetch_joinqual);
-	WRITE_BOOL_FIELD(prefetch_qual);
 
 	WRITE_ENUM_FIELD(jointype, JoinType);
 	WRITE_BOOL_FIELD(inner_unique);
@@ -770,10 +769,8 @@ _outIndexScan(StringInfo str, const IndexScan *node)
 }
 
 static void
-_outIndexOnlyScan(StringInfo str, const IndexOnlyScan *node)
+outIndexOnlyScanFields(StringInfo str, const IndexOnlyScan *node)
 {
-	WRITE_NODE_TYPE("INDEXONLYSCAN");
-
 	_outScanInfo(str, (const Scan *) node);
 
 	WRITE_OID_FIELD(indexid);
@@ -785,11 +782,30 @@ _outIndexOnlyScan(StringInfo str, const IndexOnlyScan *node)
 }
 
 static void
+_outIndexOnlyScan(StringInfo str, const IndexOnlyScan *node)
+{
+	WRITE_NODE_TYPE("INDEXONLYSCAN");
+
+	outIndexOnlyScanFields(str, node);
+}
+
+static void
 _outDynamicIndexScan(StringInfo str, const DynamicIndexScan *node)
 {
 	WRITE_NODE_TYPE("DYNAMICINDEXSCAN");
 
 	outIndexScanFields(str, &node->indexscan);
+	WRITE_NODE_FIELD(partOids);
+	WRITE_NODE_FIELD(part_prune_info);
+	WRITE_NODE_FIELD(join_prune_paramids);
+}
+
+static void
+_outDynamicIndexOnlyScan(StringInfo str, const DynamicIndexOnlyScan *node)
+{
+	WRITE_NODE_TYPE("DYNAMICINDEXONLYSCAN");
+
+	outIndexOnlyScanFields(str, &node->indexscan);
 	WRITE_NODE_FIELD(partOids);
 	WRITE_NODE_FIELD(part_prune_info);
 	WRITE_NODE_FIELD(join_prune_paramids);
@@ -1074,6 +1090,7 @@ _outDQAExpr(StringInfo str, const DQAExpr *node)
     WRITE_INT_FIELD(agg_expr_id);
     WRITE_BITMAPSET_FIELD(agg_args_id_bms);
     WRITE_NODE_FIELD(agg_filter);
+	WRITE_BITMAPSET_FIELD(agg_vars_ref);
 }
 
 static void
@@ -1148,6 +1165,7 @@ _outShareInputScan(StringInfo str, const ShareInputScan *node)
 	WRITE_INT_FIELD(producer_slice_id);
 	WRITE_INT_FIELD(this_slice_id);
 	WRITE_INT_FIELD(nconsumers);
+	WRITE_BOOL_FIELD(discard_output);
 
 	_outPlanInfo(str, (Plan *) node);
 }
@@ -1257,7 +1275,6 @@ _outPlanRowMark(StringInfo str, const PlanRowMark *node)
 	WRITE_ENUM_FIELD(strength, LockClauseStrength);
 	WRITE_ENUM_FIELD(waitPolicy, LockWaitPolicy);
 	WRITE_BOOL_FIELD(isParent);
-	WRITE_BOOL_FIELD(canOptSelectLockingClause);
 }
 
 static void
@@ -2764,6 +2781,7 @@ _outPlannerInfo(StringInfo str, const PlannerInfo *node)
 	WRITE_BOOL_FIELD(hasLateralRTEs);
 	WRITE_BOOL_FIELD(hasHavingQual);
 	WRITE_BOOL_FIELD(hasPseudoConstantQuals);
+	WRITE_BOOL_FIELD(hasAlternativeSubPlans);
 	WRITE_BOOL_FIELD(hasRecursion);
 	WRITE_INT_FIELD(wt_param_id);
 	WRITE_BITMAPSET_FIELD(curOuterRels);
@@ -3152,7 +3170,7 @@ _outCreateStmtInfo(StringInfo str, const CreateStmt *node)
 	WRITE_STRING_FIELD(tablespacename);
 	WRITE_STRING_FIELD(accessMethod);
 	WRITE_BOOL_FIELD(if_not_exists);
-	WRITE_BOOL_FIELD(gp_style_alter_part);
+	WRITE_ENUM_FIELD(origin, CreateStmtOrigin);
 
 	WRITE_NODE_FIELD(distributedBy);
 	WRITE_NODE_FIELD(partitionBy);
@@ -3372,6 +3390,7 @@ _outTruncateStmt(StringInfo str, const TruncateStmt *node)
 	WRITE_NODE_TYPE("TRUNCATESTMT");
 
 	WRITE_NODE_FIELD(relations);
+	WRITE_BOOL_FIELD(restart_seqs);
 	WRITE_ENUM_FIELD(behavior, DropBehavior);
 }
 
@@ -3510,6 +3529,7 @@ _outAlteredTableInfo(StringInfo str, const AlteredTableInfo *node)
 
 	WRITE_STRING_FIELD(replicaIdentityIndex);
 	WRITE_STRING_FIELD(clusterOnIndex);
+	WRITE_NODE_FIELD(repack_cols);
 }
 
 static void
@@ -3535,6 +3555,8 @@ _outNewColumnValue(StringInfo str, const NewColumnValue *node)
 	WRITE_NODE_FIELD(expr);
 	/* can't serialize exprstate */
 	WRITE_BOOL_FIELD(is_generated);
+	WRITE_NODE_FIELD(new_encoding);
+	WRITE_ENUM_FIELD(op, AOCSWriteColumnOperation);
 }
 
 static void
@@ -5568,6 +5590,9 @@ outNode(StringInfo str, const void *obj)
 				break;
 			case T_DynamicIndexScan:
 				_outDynamicIndexScan(str,obj);
+				break;
+			case T_DynamicIndexOnlyScan:
+				_outDynamicIndexOnlyScan(str,obj);
 				break;
 			case T_IndexOnlyScan:
 				_outIndexOnlyScan(str, obj);

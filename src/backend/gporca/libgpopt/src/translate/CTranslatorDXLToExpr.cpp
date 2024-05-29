@@ -58,6 +58,7 @@
 #include "gpopt/operators/CScalarCoalesce.h"
 #include "gpopt/operators/CScalarCoerceToDomain.h"
 #include "gpopt/operators/CScalarCoerceViaIO.h"
+#include "gpopt/operators/CScalarFieldSelect.h"
 #include "gpopt/operators/CScalarIdent.h"
 #include "gpopt/operators/CScalarIf.h"
 #include "gpopt/operators/CScalarIsDistinctFrom.h"
@@ -65,6 +66,7 @@
 #include "gpopt/operators/CScalarNullIf.h"
 #include "gpopt/operators/CScalarNullTest.h"
 #include "gpopt/operators/CScalarOp.h"
+#include "gpopt/operators/CScalarParam.h"
 #include "gpopt/operators/CScalarProjectElement.h"
 #include "gpopt/operators/CScalarProjectList.h"
 #include "gpopt/operators/CScalarSortGroupClause.h"
@@ -105,6 +107,7 @@
 #include "naucrates/dxl/operators/CDXLScalarCoerceToDomain.h"
 #include "naucrates/dxl/operators/CDXLScalarCoerceViaIO.h"
 #include "naucrates/dxl/operators/CDXLScalarDistinctComp.h"
+#include "naucrates/dxl/operators/CDXLScalarFieldSelect.h"
 #include "naucrates/dxl/operators/CDXLScalarFuncExpr.h"
 #include "naucrates/dxl/operators/CDXLScalarIdent.h"
 #include "naucrates/dxl/operators/CDXLScalarIfStmt.h"
@@ -112,6 +115,7 @@
 #include "naucrates/dxl/operators/CDXLScalarNullIf.h"
 #include "naucrates/dxl/operators/CDXLScalarNullTest.h"
 #include "naucrates/dxl/operators/CDXLScalarOpExpr.h"
+#include "naucrates/dxl/operators/CDXLScalarParam.h"
 #include "naucrates/dxl/operators/CDXLScalarProjElem.h"
 #include "naucrates/dxl/operators/CDXLScalarSortCol.h"
 #include "naucrates/dxl/operators/CDXLScalarSortGroupClause.h"
@@ -577,6 +581,8 @@ CTranslatorDXLToExpr::PexprLogicalGet(const CDXLNode *dxlnode)
 	CDXLTableDescr *table_descr =
 		CDXLLogicalGet::Cast(dxl_op)->GetDXLTableDescr();
 
+	BOOL hasSecurityQuals = CDXLLogicalGet::Cast(dxl_op)->HasSecurityQuals();
+
 	GPOS_ASSERT(nullptr != table_descr);
 	GPOS_ASSERT(nullptr != table_descr->MdName()->GetMDName());
 
@@ -630,9 +636,9 @@ CTranslatorDXLToExpr::PexprLogicalGet(const CDXLNode *dxlnode)
 		// generate a part index id
 		ULONG part_idx_id = COptCtxt::PoctxtFromTLS()->UlPartIndexNextVal();
 		partition_mdids->AddRef();
-		popGet = GPOS_NEW(m_mp)
-			CLogicalDynamicGet(m_mp, pname, ptabdesc, part_idx_id,
-							   partition_mdids, foreign_server_mdids);
+		popGet = GPOS_NEW(m_mp) CLogicalDynamicGet(
+			m_mp, pname, ptabdesc, part_idx_id, partition_mdids,
+			foreign_server_mdids, hasSecurityQuals);
 		CLogicalDynamicGet *popDynamicGet =
 			CLogicalDynamicGet::PopConvert(popGet);
 
@@ -643,7 +649,8 @@ CTranslatorDXLToExpr::PexprLogicalGet(const CDXLNode *dxlnode)
 	{
 		if (EdxlopLogicalGet == edxlopid)
 		{
-			popGet = GPOS_NEW(m_mp) CLogicalGet(m_mp, pname, ptabdesc);
+			popGet = GPOS_NEW(m_mp)
+				CLogicalGet(m_mp, pname, ptabdesc, hasSecurityQuals);
 		}
 		else
 		{
@@ -1247,6 +1254,21 @@ CTranslatorDXLToExpr::PexprLogicalCTEAnchor(const CDXLNode *dxlnode)
 	// translate the child dxl node
 	CExpression *pexprChild = PexprLogical((*dxlnode)[0]);
 
+	// if the cte subtree below the CTE anchor
+	// contains an outer reference, then when constructing a sequence of a
+	// producer/consumer, Orca won't be able to generate a valid plan.  The
+	// subtree will need to be executed multiple times, but the Sequence
+	// operator derives not rewindable, causing a material to be added
+	// above the sequence. This creates a contradiction leading to no
+	// valid plan being generated. Even if we relax this restriction,
+	// additional fixes in the executor are needed to get this working. For
+	// now, we mark the CTE as containing an outer ref and attempt to
+	// inline it instead
+
+	if (pexprChild->DeriveOuterReferences()->Size() > 0)
+	{
+		COptCtxt::PoctxtFromTLS()->Pcteinfo()->SetHasOuterReferences(id);
+	}
 	return GPOS_NEW(m_mp) CExpression(
 		m_mp, GPOS_NEW(m_mp) CLogicalCTEAnchor(m_mp, id), pexprChild);
 }
@@ -2139,11 +2161,16 @@ CTranslatorDXLToExpr::Ptabdesc(CDXLTableDescr *table_descr)
 	IMDRelation::Erelstoragetype rel_storage_type =
 		pmdrel->RetrieveRelStorageType();
 
+	// get append only table version
+	IMDRelation::Erelaoversion rel_ao_version = pmdrel->GetRelAOVersion();
+
 	mdid->AddRef();
 	CTableDescriptor *ptabdesc = GPOS_NEW(m_mp) CTableDescriptor(
 		m_mp, mdid, CName(m_mp, &strName), pmdrel->ConvertHashToRandom(),
-		rel_distr_policy, rel_storage_type, table_descr->GetExecuteAsUserId(),
-		table_descr->LockMode(), table_descr->GetAssignedQueryIdForTargetRel());
+		rel_distr_policy, rel_storage_type, rel_ao_version,
+		table_descr->GetExecuteAsUserId(), table_descr->LockMode(),
+		table_descr->GetAclMode(),
+		table_descr->GetAssignedQueryIdForTargetRel());
 
 	const ULONG ulColumns = table_descr->Arity();
 	for (ULONG ul = 0; ul < ulColumns; ul++)
@@ -2248,9 +2275,7 @@ CTranslatorDXLToExpr::RegisterMDRelationCtas(CDXLLogicalCTAS *pdxlopCTAS)
 			GPOS_NEW(m_mp) CMDName(m_mp, pdxlcd->MdName()->GetMDName()),
 			pdxlcd->AttrNum(), pdxlcd->MdidType(), pdxlcd->TypeModifier(),
 			true,  // is_nullable,
-			pdxlcd->IsDropped(),
-			nullptr,  // pdxlnDefaultValue,
-			pdxlcd->Width());
+			pdxlcd->IsDropped(), pdxlcd->Width());
 		mdcol_array->Append(pmdcol);
 	}
 
@@ -2340,9 +2365,10 @@ CTranslatorDXLToExpr::PtabdescFromCTAS(CDXLLogicalCTAS *pdxlopCTAS)
 	mdid->AddRef();
 	CTableDescriptor *ptabdesc = GPOS_NEW(m_mp) CTableDescriptor(
 		m_mp, mdid, CName(m_mp, &strName), pmdrel->ConvertHashToRandom(),
-		rel_distr_policy, rel_storage_type,
+		rel_distr_policy, rel_storage_type, IMDRelation::GetCurrentAOVersion(),
 		0,	// ulExecuteAsUser, use permissions of current user
-		3,	// CTEs always use a RowExclusiveLock on the table. See createas.c
+		3,	// CTAS always uses a RowExclusiveLock on the table. See createas.c
+		2,	// CTAS always requires SELECT and SELECT only privilege
 		UNASSIGNED_QUERYID);
 
 	// populate column information from the dxl table descriptor
@@ -2656,6 +2682,10 @@ CTranslatorDXLToExpr::PexprScalar(const CDXLNode *dxlnode)
 			return CTranslatorDXLToExpr::PexprValuesList(dxlnode);
 		case EdxlopScalarSortGroupClause:
 			return CTranslatorDXLToExpr::PexprSortGroupClause(dxlnode);
+		case EdxlopScalarFieldSelect:
+			return CTranslatorDXLToExpr::PexprFieldSelect(dxlnode);
+		case EdxlopScalarParam:
+			return CTranslatorDXLToExpr::PexprScalarParam(dxlnode);
 		default:
 			GPOS_RAISE(gpopt::ExmaGPOPT, gpopt::ExmiUnsupportedOp,
 					   dxl_op->GetOpNameStr()->GetBuffer());
@@ -3326,6 +3356,35 @@ CTranslatorDXLToExpr::PexprValuesList(const CDXLNode *dxlnode)
 		CExpression(m_mp, popScalarValuesList, pdrgpexprChildren);
 }
 
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToExpr::PexprFieldSelect
+//
+//	@doc:
+// 		Create a scalar FieldSelect operator expression from a DXL FieldSelect node
+//
+//---------------------------------------------------------------------------
+CExpression *
+CTranslatorDXLToExpr::PexprFieldSelect(const CDXLNode *dxlnode)
+{
+	CDXLScalarFieldSelect *dxl_op =
+		CDXLScalarFieldSelect::Cast(dxlnode->GetOperator());
+
+	IMDId *field_type = dxl_op->GetDXLFieldType();
+	field_type->AddRef();
+	IMDId *field_collation = dxl_op->GetDXLFieldCollation();
+	field_collation->AddRef();
+	INT type_modifier = dxl_op->GetDXLTypeModifier();
+	SINT field_number = dxl_op->GetDXLFieldNumber();
+
+	CScalarFieldSelect *popFieldSelect = GPOS_NEW(m_mp) CScalarFieldSelect(
+		m_mp, field_type, field_collation, type_modifier, field_number);
+	CExpressionArray *pdrgpexprChildren = PdrgpexprChildren(dxlnode);
+
+	return GPOS_NEW(m_mp) CExpression(m_mp, popFieldSelect, pdrgpexprChildren);
+}
+
 //---------------------------------------------------------------------------
 //	@function:
 //		CTranslatorDXLToExpr::PexprArrayRefIndexList
@@ -3436,6 +3495,31 @@ CTranslatorDXLToExpr::PexprScalarIdent(const CDXLNode *pdxlnIdent)
 	const CColRef *colref = LookupColRef(m_phmulcr, colid);
 	CExpression *pexpr = GPOS_NEW(m_mp)
 		CExpression(m_mp, GPOS_NEW(m_mp) CScalarIdent(m_mp, colref));
+
+	return pexpr;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToExpr::PexprScalarParam
+//
+//	@doc:
+// 		Create a scalar param expr from a DXL scalar param
+//
+//---------------------------------------------------------------------------
+CExpression *
+CTranslatorDXLToExpr::PexprScalarParam(const CDXLNode *pdxlnParam)
+{
+	// get dxl scalar param
+	CDXLScalarParam *dxl_op = CDXLScalarParam::Cast(pdxlnParam->GetOperator());
+
+	dxl_op->GetMDIdType()->AddRef();
+
+	CScalarParam *scalar_param = GPOS_NEW(m_mp)
+		CScalarParam(m_mp, dxl_op->GetId(), dxl_op->GetMDIdType(),
+					 dxl_op->GetTypeModifier());
+
+	CExpression *pexpr = GPOS_NEW(m_mp) CExpression(m_mp, scalar_param);
 
 	return pexpr;
 }

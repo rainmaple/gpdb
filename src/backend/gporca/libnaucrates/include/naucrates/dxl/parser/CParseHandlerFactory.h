@@ -132,6 +132,11 @@ private:
 		CMemoryPool *mp, CParseHandlerManager *parse_handler_mgr,
 		CParseHandlerBase *parse_handler_root);
 
+	// construct plan hint parse handler
+	static CParseHandlerBase *CreatePlanHintParseHandler(
+		CMemoryPool *mp, CParseHandlerManager *parse_handler_mgr,
+		CParseHandlerBase *parse_handler_root);
+
 	// construct window oids parse handler
 	static CParseHandlerBase *CreateWindowOidsParseHandler(
 		CMemoryPool *mp, CParseHandlerManager *parse_handler_mgr,
@@ -261,11 +266,6 @@ private:
 		CMemoryPool *mp, CParseHandlerManager *parse_handler_mgr,
 		CParseHandlerBase *parse_handler_root);
 
-	// construct a column default value expression parse handler
-	static CParseHandlerBase *CreateColDefaultValExprParseHandler(
-		CMemoryPool *mp, CParseHandlerManager *parse_handler_mgr,
-		CParseHandlerBase *parse_handler_root);
-
 	// construct a scalar operator parse handler
 	static CParseHandlerBase *CreateScalarOpParseHandler(
 		CMemoryPool *mp, CParseHandlerManager *parse_handler_mgr,
@@ -356,6 +356,11 @@ private:
 		CMemoryPool *mp, CParseHandlerManager *parse_handler_mgr,
 		CParseHandlerBase *parse_handler_root);
 
+	// construct a dynamic index only scan parse handler
+	static CParseHandlerBase *CreateDynamicIdxOnlyScanParseHandler(
+		CMemoryPool *mp, CParseHandlerManager *parse_handler_mgr,
+		CParseHandlerBase *parse_handler_root);
+
 	// construct a partition selector parse handler
 	static CParseHandlerBase *CreatePartitionSelectorParseHandler(
 		CMemoryPool *mp, CParseHandlerManager *parse_handler_mgr,
@@ -398,6 +403,11 @@ private:
 
 	// construct an arrayref parse handler
 	static CParseHandlerBase *CreateScArrayRefParseHandler(
+		CMemoryPool *mp, CParseHandlerManager *parse_handler_mgr,
+		CParseHandlerBase *parse_handler_root);
+
+	// construct an FieldSelect parse handler
+	static CParseHandlerBase *CreateScalarFieldSelectParseHandler(
 		CMemoryPool *mp, CParseHandlerManager *parse_handler_mgr,
 		CParseHandlerBase *parse_handler_root);
 
@@ -549,6 +559,11 @@ private:
 
 	// construct a scalar operator parse handler
 	static CParseHandlerBase *CreateScOpExprParseHandler(
+		CMemoryPool *mp, CParseHandlerManager *parse_handler_mgr,
+		CParseHandlerBase *parse_handler_root);
+
+	// construct a scalar param parse handler
+	static CParseHandlerBase *CreateScParamParseHandler(
 		CMemoryPool *mp, CParseHandlerManager *parse_handler_mgr,
 		CParseHandlerBase *parse_handler_root);
 

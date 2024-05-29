@@ -58,6 +58,7 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
+#include "parser/parse_oper.h"
 
 
 /*
@@ -116,6 +117,7 @@ typedef struct deparse_expr_cxt
  * Functions to determine whether an expression can be evaluated safely on
  * remote server.
  */
+static bool partial_agg_pushdown(Aggref* agg, PgFdwRelationInfo *fpinfo);
 static bool foreign_expr_walker(Node *node,
 								foreign_glob_cxt *glob_cxt,
 								foreign_loc_cxt *outer_cxt);
@@ -181,6 +183,7 @@ static void deparseRangeTblRef(StringInfo buf, PlannerInfo *root,
 							   RelOptInfo *foreignrel, bool make_subquery,
 							   Index ignore_rel, List **ignore_conds, List **params_list);
 static void deparseAggref(Aggref *node, deparse_expr_cxt *context);
+static void deparsePartialAggref(Aggref *node, deparse_expr_cxt *context);
 static void appendGroupByClause(List *tlist, deparse_expr_cxt *context);
 static void appendOrderBySuffix(Oid sortop, Oid sortcoltype, bool nulls_first,
 								deparse_expr_cxt *context);
@@ -226,6 +229,92 @@ classifyConditions(PlannerInfo *root,
 		else
 			*local_conds = lappend(*local_conds, ri);
 	}
+}
+
+static bool supported_by_fdw(Oid target)
+{
+	/*
+	 * If aggregate functions have final functions or have internal transition
+	 * type, FDW need to handle them specifically to gurantee corrrect partial
+	 * aggregate pushdown.
+	 *
+	 * Those aggregate functions can be got by execute the SQL as follows.
+	 *     SELECT aggfnoid::oid, aggfnoid
+	 *     FROM pg_aggregate
+	 *     WHERE aggcombinefn::text != '-'
+	 *           and
+	 *           (aggfinalfn::text != '-' or aggtranstype = 2281);
+	 * Here 2281 is INTERNALOID.
+	 *
+	 * Array supported_partial_agg stores oid of such aggregate functions supported
+	 * currently.
+	 */
+	static Oid supported_partial_agg[] = {
+			2100, /* pg_catalog.avg int8|bigint */
+			2101, /* pg_catalog.avg int4|int */
+			2102, /* pg_catalog.avg int2|smallint */
+			2103, /* pg_catalog.avg numeric */
+			2104, /* pg_catalog.avg float4 */
+			2105, /* pg_catalog.avg float8 */
+			2107, /* pg_catalog.sum int8|bigint */
+			2114, /* pg_catalog.sum numeric */
+	};
+
+	for (int i = 0; i < sizeof(supported_partial_agg) / sizeof(Oid); ++i)
+	{
+		if (target == supported_partial_agg[i])
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * Check whether partial aggregate is safe to push down.
+ * condition1) agg is AGGKIND_NORMAL aggregate which contains no distinct
+ *   or order by clauses
+ * condition2) The aggtranstype is not internal and aggfinalfn is null.
+ *   In this case, nothing we need to do.
+ * condition3) The aggtranstype is not internal, but aggfinalfn is not null.
+ *   In this case, we only need to adjust the remote SQL.
+ * condition4) The aggtranstype is internal.
+ *   We may need to adjust the remote SQL, and then we need to do a trans-code
+ *   to transform the final-result from remote server into partial-result.
+ */
+static bool
+partial_agg_pushdown(Aggref *agg, PgFdwRelationInfo *fpinfo)
+{
+	HeapTuple	aggtup;
+	Form_pg_aggregate aggform;
+	bool        partial_agg_pushdown = true;
+
+	Assert(agg->aggsplit == AGGSPLIT_INITIAL_SERIAL);
+
+	/* We don't support complex partial aggregates */
+	if (agg->aggdistinct || agg->aggkind != AGGKIND_NORMAL || agg->aggorder != NIL)
+		return false;
+
+	aggtup = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(agg->aggfnoid));
+	if (!HeapTupleIsValid(aggtup))
+		elog(ERROR, "cache lookup failed for aggregate %u", agg->aggfnoid);
+	aggform = (Form_pg_aggregate)GETSTRUCT(aggtup);
+
+	if ((aggform->aggtranstype != INTERNALOID) && (aggform->aggfinalfn == InvalidOid))
+	{
+		partial_agg_pushdown = true;
+	}
+	else if (supported_by_fdw(aggform->aggfnoid))
+	{
+		partial_agg_pushdown = true;
+	}
+	else
+	{
+		partial_agg_pushdown = false;
+	}
+
+	ReleaseSysCache(aggtup);
+	return partial_agg_pushdown;
 }
 
 /*
@@ -704,8 +793,11 @@ foreign_expr_walker(Node *node,
 				if (!IS_UPPER_REL(glob_cxt->foreignrel))
 					return false;
 
-				/* Only non-split aggregates are pushable. */
-				if (agg->aggsplit != AGGSPLIT_SIMPLE)
+				/* Only AGGSPLIT_SIMPLE and AGGSPLIT_INITIAL_SERIAL aggregates are pushable. */
+				if (agg->aggsplit != AGGSPLIT_SIMPLE &&
+					agg->aggsplit != AGGSPLIT_INITIAL_SERIAL)
+					return false;
+				if (agg->aggsplit == AGGSPLIT_INITIAL_SERIAL && !partial_agg_pushdown(agg, fpinfo))
 					return false;
 
 				/* As usual, it must be shippable. */
@@ -2416,7 +2508,10 @@ deparseExpr(Expr *node, deparse_expr_cxt *context)
 			deparseArrayExpr((ArrayExpr *) node, context);
 			break;
 		case T_Aggref:
-			deparseAggref((Aggref *) node, context);
+			if (((Aggref *) node)->aggsplit == AGGSPLIT_INITIAL_SERIAL)
+				deparsePartialAggref((Aggref *) node, context);
+			else
+				deparseAggref((Aggref *) node, context);
 			break;
 		default:
 			elog(ERROR, "unsupported expression type for deparse: %d",
@@ -2996,6 +3091,101 @@ deparseArrayExpr(ArrayExpr *node, deparse_expr_cxt *context)
 						 deparse_type_name(node->array_typeid, -1));
 }
 
+static void
+deparsePartialAggFunctionParamFilter(Aggref *node, deparse_expr_cxt *context,
+	StringInfo agg_param, StringInfo agg_filter)
+{
+	StringInfo buf = context->buf;
+
+	switch (node->aggfnoid)
+	{
+		case 2100:
+			/* int8 AVG */
+			/* Fall through */
+		case 2101:
+			/* int4 AVG function */
+			/* Fall through */
+		case 2102:
+			/* int2 AVG function */
+			/* Fall through */
+		case 2103:
+			/* numeric AVG function */
+			/* According to aggcombinefn, those aggregate functions need to fetch same columns from remote server. */
+			appendStringInfo(buf, "array[count(%s)%s, sum(%s)%s]", agg_param->data, agg_filter->data,
+				agg_param->data, agg_filter->data);
+			break;
+		case 2104:
+			/* float4 AVG function */
+			/* Fall through */
+		case 2105:
+			/* float8 AVG function */
+			appendStringInfo(buf, "array[count(%s)%s, sum(%s)%s, count(%s)*var_pop(%s)%s]",
+				agg_param->data, agg_filter->data, agg_param->data, agg_filter->data,
+				agg_param->data, agg_param->data, agg_filter->data);
+			break;
+		default:
+			/* Find aggregate name from aggfnoid which is a pg_proc entry */
+			appendFunctionName(node->aggfnoid, context);
+			appendStringInfo(buf, "(%s)%s", agg_param->data, agg_filter->data);
+			break;
+	}
+}
+/* Deparse an Partial Aggref node. */
+static void
+deparsePartialAggref(Aggref *node, deparse_expr_cxt *context)
+{
+	StringInfoData agg_param;
+	StringInfoData agg_filter;
+	bool		use_variadic;
+	StringInfo origin_buf = context->buf;
+
+	/* Check if need to print VARIADIC (cf. ruleutils.c) */
+	use_variadic = node->aggvariadic;
+	initStringInfo(&agg_param);
+	initStringInfo(&agg_filter);
+
+	context->buf = &agg_param;
+	/* aggstar can be set only in zero-argument aggregates */
+	if (node->aggstar)
+		appendStringInfoChar(&agg_param, '*');
+	else
+	{
+		ListCell   *arg;
+		bool		first = true;
+
+		/* Add all the arguments */
+		foreach(arg, node->args)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(arg);
+			Node	   *n = (Node *) tle->expr;
+
+			if (tle->resjunk)
+				continue;
+
+			if (!first)
+				appendStringInfoString(&agg_param, ", ");
+			first = false;
+
+			/* Add VARIADIC */
+			if (use_variadic && lnext(arg) == NULL)
+				appendStringInfoString(&agg_param, "VARIADIC ");
+
+			deparseExpr((Expr *) n, context);
+		}
+	}
+
+	context->buf = &agg_filter;
+	/* Add FILTER (WHERE ..) */
+	if (node->aggfilter != NULL)
+	{
+		appendStringInfoString(&agg_filter, " FILTER (WHERE ");
+		deparseExpr((Expr *) node->aggfilter, context);
+		appendStringInfoChar(&agg_filter, ')');
+	}
+
+	context->buf = origin_buf;
+	deparsePartialAggFunctionParamFilter(node, context, &agg_param, &agg_filter);
+}
 /*
  * Deparse an Aggref node.
  */
@@ -3328,19 +3518,78 @@ appendLimitClause(deparse_expr_cxt *context)
 	PlannerInfo *root = context->root;
 	StringInfo	buf = context->buf;
 	int			nestlevel;
+	RelOptInfo	*foreignrel = context->foreignrel;
 
 	/* Make sure any constants in the exprs are printed portably */
 	nestlevel = set_transmission_modes();
 
-	if (root->parse->limitCount)
+	if (foreignrel->exec_location != FTEXECLOCATION_ALL_SEGMENTS)
 	{
-		appendStringInfoString(buf, " LIMIT ");
-		deparseExpr((Expr *) root->parse->limitCount, context);
+		if (root->parse->limitCount)
+		{
+			appendStringInfoString(buf, " LIMIT ");
+			deparseExpr((Expr *) root->parse->limitCount, context);
+		}
+		if (root->parse->limitOffset)
+		{
+			appendStringInfoString(buf, " OFFSET ");
+			deparseExpr((Expr *) root->parse->limitOffset, context);
+		}
 	}
-	if (root->parse->limitOffset)
+	else
 	{
-		appendStringInfoString(buf, " OFFSET ");
-		deparseExpr((Expr *) root->parse->limitOffset, context);
+		/*
+		 * If mpp_execute = 'all segments', we can add a preliminary LIMIT
+		 * on the partitioned results.
+		 * This may reduce the number of tuples that we need to fetch from remote servers.
+		 */
+		Node	   *precount = copyObject(root->parse->limitCount);
+		Node 	   *offset = copyObject(root->parse->limitOffset);
+		bool		offset_needed = ((precount != NULL) && (offset != NULL));
+
+		/*
+		 * If we've specified both OFFSET and LIMIT clause,
+		 * it's enough to fetch tuples from 0 to limitCount + limitOffset from remote servers.
+		 * optimize (N > 0):
+		 * 	LIMIT 0 OFFSET N to LIMIT 0
+		 * 	LIMIT 0 OFFSET NULL to LIMIT 0
+		 * 	LIMIT N OFFSET NULL to LIMIT N
+		 * 	LIMIT N OFFSET 0 to LIMIT N
+		 */
+		if (offset_needed &&
+			IsA(precount, Const) &&
+			(((Const *) precount)->constisnull || ((Const *) precount)->constvalue == 0))
+			offset_needed = false;
+
+		if (offset_needed &&
+			IsA(offset, Const) &&
+			(((Const *) offset)->constisnull || ((Const *) offset)->constvalue == 0))
+			offset_needed = false;
+
+		if (precount)
+		{
+			if (offset_needed)
+			{
+				ParseState *pstate = make_parsestate(NULL);
+				/*
+				 * we should explicitly specify the schema of operator "+",
+				 * to avoid misuse user defined operator "+".
+				 */
+				precount = (Node *) make_op(pstate,
+											list_make2(makeString("pg_catalog"), makeString(pstrdup("+"))),
+											offset,
+											precount,
+											NULL,
+											-1);
+			}
+
+			appendStringInfoString(buf, " LIMIT ");
+			deparseExpr((Expr *) precount, context);
+		}
+		/*
+		 * If LIMIT clause is NOT specified, we need to fetch all tuple of foreign table.
+		 * So here we don't append LIMIT to Remote SQL.
+		 */
 	}
 
 	reset_transmission_modes(nestlevel);

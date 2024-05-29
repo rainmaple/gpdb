@@ -4,6 +4,7 @@ import pipes
 import signal
 import time
 import re
+from datetime import datetime
 
 from gppylib.recoveryinfo import RecoveryResult
 from gppylib.mainUtils import *
@@ -60,8 +61,31 @@ def get_recovery_progress_file(gplog):
     return "{}/recovery_progress.file".format(gplog.get_logger_dir())
 
 
-def get_recovery_progress_pattern():
+def get_recovery_progress_pattern(recovery_type='incremental'):
+    """
+    Returns the pattern of progress result for various type of recoveries
+    For example:
+        progress of pg_basebackup/pg_rewind look like: "164848/1371715 kB (84%)"
+        progress of rsync looks like: "1,036,923,510  99%   39.90MB/s    0:00:24"
+    """
+    if recovery_type == 'differential':
+        return r" +\d+%\ +\d+.\d+(kB|MB)\/s"
     return r"\d+\/\d+ (kB|mB) \(\d+\%\)"
+
+
+def get_recovery_type(file_basename):
+    """
+    To get the recovery type based on progress file name
+    params: file_basename: path base of progress file created
+    returns: string which represents recovery type
+    """
+    recovery_type = 'incremental'
+    if file_basename == 'pg_basebackup':
+        recovery_type = 'full'
+    elif file_basename == 'rsync':
+        recovery_type = 'differential'
+    return recovery_type
+
 
 #
 # note: it's a little quirky that caller must set up failed/failover so that failover is in gparray but
@@ -73,7 +97,7 @@ def get_recovery_progress_pattern():
 #   failoverSegment = segment to recover "to"
 # In other words, we are recovering the failedSegment to the failoverSegment using the liveSegment.
 class GpMirrorToBuild:
-    def __init__(self, failedSegment, liveSegment, failoverSegment, forceFullSynchronization):
+    def __init__(self, failedSegment, liveSegment, failoverSegment, forceFullSynchronization, differentialSynchronization, recoveryType=None):
         checkNotNone("forceFullSynchronization", forceFullSynchronization)
 
         # We need to call this validate function here because addmirrors directly calls GpMirrorToBuild.
@@ -87,8 +111,22 @@ class GpMirrorToBuild:
         __forceFullSynchronization is true if full resynchronization should be FORCED -- that is, the
            existing segment will be cleared and all objects will be transferred by the file resynchronization
            process on the server
+
+        __differentialSynchronization is true if differential resynchronization should be done -- that is only 
+        the delta between the source and target datadir will be copied over to the target server
         """
         self.__forceFullSynchronization = forceFullSynchronization
+        self.__differentialSynchronization = differentialSynchronization
+
+        if not (
+            forceFullSynchronization or differentialSynchronization) and recoveryType in [
+            "Differential", "Full"] and self.__failoverSegment is None:
+            # If either forceFullSynchronization or differentialSynchronization is explicitly not set, and
+            # If recovery config file is provided without failover segment and recoveryType is either "Differential" or "Full",
+            # set __forceFullSynchronization and __differentialSynchronization to True accordingly.
+            self.__forceFullSynchronization = recoveryType == "Full"
+            self.__differentialSynchronization = recoveryType == "Differential"
+
 
     def getFailedSegment(self):
         """
@@ -124,6 +162,12 @@ class GpMirrorToBuild:
 
         return False
 
+    def isDifferentialSynchronization(self):
+        """
+        Returns whether or not this segment to recover needs to be recovered using differential synchronization method
+        """
+        return self.__differentialSynchronization
+
 
 class GpMirrorListToBuild:
     class Progress:
@@ -135,7 +179,7 @@ class GpMirrorListToBuild:
         ADDMIRRORS='add'
         RECOVERMIRRORS='recover'
 
-    def __init__(self, toBuild, pool, quiet, parallelDegree, additionalWarnings=None, logger=logger, forceoverwrite=False, progressMode=Progress.INPLACE, parallelPerHost=gp.DEFAULT_SEGHOST_NUM_WORKERS):
+    def __init__(self, toBuild, pool, quiet, parallelDegree, additionalWarnings=None, logger=logger, forceoverwrite=False, progressMode=Progress.INPLACE, parallelPerHost=gp.DEFAULT_SEGHOST_NUM_WORKERS, maxRate=None):
         self.__mirrorsToBuild = toBuild
         self.__pool = pool
         self.__quiet = quiet
@@ -145,6 +189,7 @@ class GpMirrorListToBuild:
         self.__forceoverwrite = forceoverwrite
         self.__parallelPerHost = parallelPerHost
         self.__additionalWarnings = additionalWarnings or []
+        self.__maxRate = maxRate
         self.segments_to_mark_down = []
         if not logger:
             raise Exception('logger argument cannot be None')
@@ -173,6 +218,12 @@ class GpMirrorListToBuild:
         Returns any additional warnings generated during building of list
         """
         return self.__additionalWarnings
+
+    def getMaxTransferRate(self):
+        """
+        returns the maximum transfer rate of data directory during Full recovery of failed segments
+        """
+        return self.__maxRate
 
     def _cleanup_before_recovery(self, gpArray, gpEnv):
         self.checkForPortAndDirectoryConflicts(gpArray)
@@ -211,6 +262,15 @@ class GpMirrorListToBuild:
             live_seg = toRecover.getLiveSegment()
             live_seg.setSegmentMode(gparray.MODE_NOT_SYNC)
 
+    # Remove any existing progress file of segments that will be recovered by current gprecoverseg execution.
+    def remove_existing_progress_files(self, recovery_info_by_host):
+        remove_progress_file_cmds = []
+        for hostName, recovery_info_list in recovery_info_by_host.items():
+            for ri in recovery_info_list:
+                remove_progress_file_cmds.append(self._get_remove_cmd("*dbid{}.out".format(ri.target_segment_dbid),
+                                                                      hostName))
+        self.__runWaitAndCheckWorkerPoolForErrorsAndClear(remove_progress_file_cmds, suppressErrorCheck=True)
+
     def add_mirrors(self, gpEnv, gpArray):
         return self.__build_mirrors(GpMirrorListToBuild.Action.ADDMIRRORS, gpEnv, gpArray)
 
@@ -239,6 +299,9 @@ class GpMirrorListToBuild:
         self._validate_gparray(gpArray)
 
         recovery_info_by_host = recoveryinfo.build_recovery_info(self.__mirrorsToBuild)
+
+        # Remove any existing progress files for segments to be recovered
+        self.remove_existing_progress_files(recovery_info_by_host)
 
         self._run_setup_recovery(actionName, recovery_info_by_host)
 
@@ -274,7 +337,7 @@ class GpMirrorListToBuild:
                     full_recovery_dbids[ri.target_segment_dbid] = True
 
         # Disable Ctrl-C, going to save metadata in database and transition segments
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        old_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
         backout_map = None
         try:
             self.__logger.info("Updating configuration for mirrors")
@@ -289,16 +352,8 @@ class GpMirrorListToBuild:
             self.__logger.debug("Generating configuration backout scripts")
         finally:
             # Re-enable Ctrl-C
-            signal.signal(signal.SIGINT, signal.default_int_handler)
+            signal.signal(signal.SIGINT, old_handler)
             return backout_map
-
-    def _remove_progress_files(self, recovery_info_by_host, recovery_results):
-        remove_progress_file_cmds = []
-        for hostName, recovery_info_list in recovery_info_by_host.items():
-            for ri in recovery_info_list:
-                if recovery_results.was_bb_rewind_successful(ri.target_segment_dbid):
-                    remove_progress_file_cmds.append(self._get_remove_cmd(ri.progress_file, hostName))
-        self.__runWaitAndCheckWorkerPoolForErrorsAndClear(remove_progress_file_cmds, suppressErrorCheck=False)
 
     def _revert_config_update(self, recovery_results, backout_map):
         if len(backout_map) == 0:
@@ -311,7 +366,7 @@ class GpMirrorListToBuild:
             #TODO 1. we don't need to check for both bb and rewind
             #TODO 2. we can ignore incremental dbids. Ideally incremental dbids won't have a backout script
             # but being explicit in the code will make the intent clear
-            if recovery_results.was_bb_rewind_successful(dbid):
+            if recovery_results.was_bb_rewind_rsync_successful(dbid):
                 continue
             for statement in backout_map[dbid]:
                 final_sql += "{};\n".format(statement)
@@ -387,7 +442,8 @@ class GpMirrorListToBuild:
                     cmd.run(validateAfter=True)
                     cmd.cmdStr = cmd_str
                     results = cmd.get_results().stdout.rstrip()
-                    if not results:
+                    recovery_type = get_recovery_type(os.path.basename(cmd.filePath).split('.')[0])
+                    if not results and recovery_type == 'incremental':
                         results = "skipping pg_rewind on mirror as standby.signal is present"
                 except ExecutionError:
                     lines = cmd.get_results().stderr.splitlines()
@@ -396,24 +452,29 @@ class GpMirrorListToBuild:
                     else:
                         results = ''
 
-                output.append("%s (dbid %d): %s" % (cmd.remoteHost, cmd.dbid, results))
+                output.append("%s: %s (dbid %d): %s" % (datetime.now(), cmd.remoteHost, cmd.dbid, results))
                 if inplace:
                     output.append("\x1B[K")
                 output.append("\n")
-
-                if re.search(pattern, results):
-                    recovery_type = 'full' if os.path.basename(cmd.filePath).split('.')[0] == 'pg_basebackup' else 'incremental'
+                if re.search(diff_pattern, results) or re.search(rewind_bb_pattern, results):
                     complete_progress_output.extend("%s:%d:%s\n" % (recovery_type, cmd.dbid, results))
 
             combined_progress_file.write("".join(complete_progress_output))
             combined_progress_file.flush()
 
-            outfile.write("".join(output))
-            outfile.flush()
+            try:
+                outfile.write("".join(output))
+                outfile.flush()
+
+            # During SSH disconnections, writing to stdout might not be possible. So ignore the
+            # error, but continue writing to the recovery_progress file.
+            except IOError:
+                pass
 
         written = False
         combined_progress_filepath = get_recovery_progress_file(gplog)
-        pattern = re.compile(get_recovery_progress_pattern())
+        rewind_bb_pattern = re.compile(get_recovery_progress_pattern())
+        diff_pattern = re.compile(get_recovery_progress_pattern('differential'))
         try:
             with open(combined_progress_filepath, 'w') as combined_progress_file:
                 while not self.__pool.join(interval):
@@ -426,22 +487,71 @@ class GpMirrorListToBuild:
                 os.remove(combined_progress_filepath)
 
 
-    def _get_progress_cmd(self, progressFile, targetSegmentDbId, targetHostname):
+    def _get_progress_cmd(self, progressFile, targetSegmentDbId, targetHostname, isDifferentialRecovery):
         """
         # There is race between when the recovery process creates the progressFile
         # when this progress cmd is run. Thus, the progress command touches
         # the file to ensure its presence before tailing.
         """
         if self.__progressMode != GpMirrorListToBuild.Progress.NONE:
-            return GpMirrorListToBuild.ProgressCommand("tail the last line of the file",
-                                                       "set -o pipefail; touch -a {0}; tail -1 {0} | tr '\\r' '\\n' |"
-                                                       " tail -1".format(pipes.quote(progressFile)),
-                                                       targetSegmentDbId, progressFile, ctxt=base.REMOTE,
-                                                       remoteHost=targetHostname)
+            cmd_desc = "tail the last line of the file"
+            if isDifferentialRecovery:
+                # For differential recovery, use sed to filter lines with specific patterns to avoid race condition.
+
+                # Set the option to make the pipeline fail if any command within it fails;
+                # Example: set -o pipefail;
+
+                # Create or update a file with the name specified in {0};
+                # Example: touch -a 'rsync.20230926_145006.dbid2.out';
+
+                # Display the last 3 lines of the file specified in {0} and pass them to the next command;
+                # Example: If {0} contains:
+                # receiving incremental file list
+                #
+                #               0   0%    0.00kB/s    0:00:00   :Syncing pg_control file of dbid 5
+                #           8,192 100%    7.81MB/s    0:00:00 (xfr#1, to-chk=0/1) :Syncing pg_control file of dbid 5
+                #           8,192 100%    7.81MB/s    0:00:00 (xfr#1, to-chk=0/1) :Syncing pg_control file of dbid 5
+                #
+                # This command will pass the above lines (excluding the first) to the next command.
+
+                # Process the output using sed (stream editor), printing lines that match certain patterns;
+                # Example: If the output is "          8,192 100%    7.81MB/s    0:00:00 (xfr#1, to-chk=0/1) :Syncing pg_control file of dbid 5",
+                # this command will print:
+                # 8,192 100%    7.81MB/s    0:00:00 (xfr#1, to-chk=0/1) :Syncing pg_control file of dbid 5
+                #
+                # It will print lines that contain ":Syncing.*dbid", "error:", or "total".
+
+                # Translate carriage return characters to newline characters;
+                # Example: If the output contains '\r' characters, they will be replaced with '\n'.
+
+                # Display only the last line of the processed output.
+                # Example: If the output after the previous command is:
+                # 8,192 100%    7.81MB/s    0:00:00 (xfr#1, to-chk=0/1) :Syncing pg_control file of dbid 5
+                # This command will output the same line.
+
+                cmd_str = (
+                    "set -o pipefail; touch -a {0}; tail -3 {0} | sed -n -e '/:Syncing.*dbid/p; /error:/p; /total/p' | tr '\\r' '\\n' | tail -1"
+                    .format(pipes.quote(progressFile))
+                )
+            else:
+                # For full and incremental recovery, simply tail the last line.
+                cmd_str = (
+                    "set -o pipefail; touch -a {0}; tail -1 {0} | tr '\\r' '\\n' | tail -1"
+                    .format(pipes.quote(progressFile))
+                )
+
+            progress_command = GpMirrorListToBuild.ProgressCommand(
+                cmd_desc, cmd_str,
+                targetSegmentDbId, progressFile, ctxt=base.REMOTE,
+                remoteHost=targetHostname
+            )
+
+            return progress_command
+
         return None
 
-    def _get_remove_cmd(self, cmd, target_host):
-        return base.Command("remove file", "rm -f {}".format(pipes.quote(cmd)), ctxt=base.REMOTE, remoteHost=target_host)
+    def _get_remove_cmd(self, remove_file, target_host):
+        return base.Command("remove file", "find {} -name {} -delete".format(gplog.get_logger_dir(), pipes.quote(remove_file)), ctxt=base.REMOTE, remoteHost=target_host)
 
     def __runWaitAndCheckWorkerPoolForErrorsAndClear(self, cmds, suppressErrorCheck=False, progressCmds=[]):
         for cmd in cmds:
@@ -477,9 +587,8 @@ class GpMirrorListToBuild:
     def _run_recovery(self, action_name, recovery_info_by_host, gpEnv):
         completed_recovery_results = self._do_recovery(recovery_info_by_host, gpEnv)
         recovery_results = RecoveryResult(action_name, completed_recovery_results, self.__logger)
-        recovery_results.print_bb_rewind_update_and_start_errors()
+        recovery_results.print_bb_rewind_differential_update_and_start_errors()
 
-        self._remove_progress_files(recovery_info_by_host, recovery_results)
         return recovery_results
 
     def _do_recovery(self, recovery_info_by_host, gpEnv):
@@ -500,7 +609,7 @@ class GpMirrorListToBuild:
         era = read_era(gpEnv.getCoordinatorDataDir(), logger=self.__logger)
         for hostName, recovery_info_list in recovery_info_by_host.items():
             for ri in recovery_info_list:
-                progressCmd = self._get_progress_cmd(ri.progress_file, ri.target_segment_dbid, hostName)
+                progressCmd = self._get_progress_cmd(ri.progress_file, ri.target_segment_dbid, hostName, ri.is_differential_recovery)
                 if progressCmd:
                     progress_cmds.append(progressCmd)
 
@@ -511,6 +620,7 @@ class GpMirrorListToBuild:
                                          batchSize=self.__parallelPerHost,
                                          remoteHost=hostName,
                                          era=era,
+                                         maxRate=self.__maxRate,
                                          forceoverwrite=self.__forceoverwrite))
         completed_recovery_results = self.__runWaitAndCheckWorkerPoolForErrorsAndClear(cmds, suppressErrorCheck=True,
                                                                                        progressCmds=progress_cmds)
@@ -559,7 +669,7 @@ class GpMirrorListToBuild:
         return running_segments
 
     def dereference_remote_symlink(self, datadir, host):
-        cmdStr = """python -c 'import os; print(os.path.realpath("%s"))'""" % datadir
+        cmdStr = """python3 -c 'import os; print(os.path.realpath("%s"))'""" % datadir
         cmd = base.Command('dereference a symlink on a remote host', cmdStr=cmdStr, ctxt=base.REMOTE, remoteHost=host)
         cmd.run()
         results = cmd.get_results()

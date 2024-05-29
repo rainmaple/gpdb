@@ -1,14 +1,21 @@
 --
 -- ORCA tests
 --
+-- start_matchsubs
+-- m/\(cost=.*\)/
+-- s/\(cost=.*\)//
+--
+-- m/\(slice\d+; segments: \d+\)/
+-- s/\(slice\d+; segments: \d+\)//
+-- end_matchsubs
 
 -- show version
 SELECT count(*) from gp_opt_version();
 
 -- Mask out Log & timestamp for orca message that has feature not supported.
 -- start_matchsubs
--- m/^LOG.*\"Feature/
--- s/^LOG.*\"Feature/\"Feature/
+-- m/^LOG.*\"Falling/
+-- s/^LOG.*\"Falling/\"Falling/
 -- end_matchsubs
 
 -- fix the number of segments for Orca
@@ -1544,7 +1551,7 @@ alter table orca.bm_dyn_test drop column to_be_dropped;
 alter table orca.bm_dyn_test add partition part5 values(5);
 insert into orca.bm_dyn_test values(2, 5, '2');
 
-set optimizer_enable_bitmapscan=on;
+set optimizer_enable_dynamicbitmapscan=on;
 -- start_ignore
 analyze orca.bm_dyn_test;
 -- end_ignore
@@ -1935,6 +1942,7 @@ CREATE INDEX btree_test_index ON btree_test(a);
 set optimizer_enable_tablescan = off;
 -- start_ignore
 select disable_xform('CXformSelect2IndexGet');
+select disable_xform('CXformSelect2IndexOnlyGet');
 -- end_ignore
 EXPLAIN SELECT * FROM btree_test WHERE a in (1, 47);
 EXPLAIN SELECT * FROM btree_test WHERE a in ('2', 47);
@@ -1946,6 +1954,7 @@ EXPLAIN SELECT * FROM btree_test WHERE a in (1, 2, 47) AND b > 1;
 SELECT * FROM btree_test WHERE a in (1, 2, 47) AND b > 1;
 -- start_ignore
 select enable_xform('CXformSelect2IndexGet');
+select enable_xform('CXformSelect2IndexOnlyGet');
 -- end_ignore
 reset optimizer_enable_tablescan;
 
@@ -2537,6 +2546,7 @@ EXPLAIN SELECT a, b FROM btab_old_hash LEFT OUTER JOIN atab_old_hash ON a |=| b;
 SELECT a, b FROM btab_old_hash LEFT OUTER JOIN atab_old_hash ON a |=| b;
 
 set optimizer_expand_fulljoin = on;
+select disable_xform('CXformFullOuterJoin2HashJoin');
 EXPLAIN SELECT a, b FROM atab_old_hash FULL JOIN btab_old_hash ON a |=| b;
 SELECT a, b FROM atab_old_hash FULL JOIN btab_old_hash ON a |=| b;
 reset optimizer_expand_fulljoin;
@@ -2898,6 +2908,12 @@ analyze roj2;
 set optimizer_enable_motion_redistribute=off;
 select count(*), t2.c from roj1 t1 left join roj2 t2 on t1.a = t2.c group by t2.c;
 explain (costs off) select count(*), t2.c from roj1 t1 left join roj2 t2 on t1.a = t2.c group by t2.c;
+
+-- check that ROJ can be disabled via GUC
+set optimizer_enable_right_outer_join=off;
+explain (costs off) select count(*), t2.c from roj1 t1 left join roj2 t2 on t1.a = t2.c group by t2.c;
+reset optimizer_enable_right_outer_join;
+
 reset optimizer_enable_motion_redistribute;
 
 reset enable_sort;
@@ -2946,7 +2962,6 @@ set optimizer_enable_nljoin=off;
 -- other than an index-only scan or sequential scan.
 explain (costs off) select * from t_ao_btree where a = 3 and b = 3;
 explain (costs off) select * from tpart_ao_btree where a = 3 and b = 3;
--- expect a fallback for all four of these queries
 select * from tpart_dim d join t_ao_btree f on d.a=f.a where d.b=1;
 select * from tpart_dim d join tpart_ao_btree f on d.a=f.a where d.b=1;
 
@@ -3016,6 +3031,7 @@ default partition def);
 create INDEX y_idx on y (j);
 
 set optimizer_enable_indexjoin=on;
+set optimizer_enable_dynamicindexscan=on;
 explain (costs off) select count(*) from x, y where (x.i > y.j AND x.j <= y.i);
 reset optimizer_enable_indexjoin;
 
@@ -3470,6 +3486,56 @@ select a from mix_func_cast();
 select b from mix_func_cast();
 select c from mix_func_cast();
 
+----------------------------------
+-- Test ORCA support for FIELDSELECT
+----------------------------------
+create type comp_type as ( a text, b numeric, c int, d float, e int);
+create table comp_table(id int, item comp_type) distributed by (id);
+create table comp_part (id int, item comp_type) distributed by (id) partition by range(id) (start(1) end(4) every(1));
+insert into comp_table values (1, ROW('GP', 10.5, 10, 10.5, 20)), (2, ROW('VM',20.5, 20, 10.5, 20)), (3, ROW('DB',10.5, 10, 10.5, 10));
+insert into comp_part values (1, ROW('GP', 10.5, 10, 10.5, 20)), (2, ROW('VM',20.5, 20, 10.5, 20)), (3, ROW('DB',10.5, 10, 10.5, 10));
+analyze comp_table;
+analyze comp_part;
+
+select sum((item).b) from comp_table where (item).c=20;
+explain (costs off) select sum((item).b) from comp_table where (item).c=20;
+
+select distinct (item).b from comp_table where (item).c=20;
+explain (costs off) select distinct (item).b from comp_table where (item).c=20;
+
+-- verify the query output using predicate with the same composite type
+select (item).a from comp_table where (item).c=20 and (item).e >10;
+explain (costs off) select (item).a from comp_table where (item).c=20 and (item).e >10;
+
+-- verify the query output using predicate with the different composite type
+select * from comp_table where (item).c>(item).d;
+explain (costs off) select * from comp_table where (item).c>(item).d ;
+
+-- verify the query output by using a composite type in a join query
+select (x.item).a from comp_table x join comp_table y on (x.item).c=(y.item).c;
+explain (costs off) select (x.item).a from comp_table x join comp_table y on (x.item).c=(y.item).c;
+
+-- verify the query output by using a composite type in a TVF query
+select (x.item).a, (select count(*) from generate_series(1, (x.item).c)) from comp_table x;
+explain (costs off) select (x.item).a, (select count(*) from generate_series(1, (x.item).c)) from comp_table x;
+
+-- verify the query output by using a composite type in a cte query
+with cte1 as (select * from comp_table where (item).c>10) select id, (item).a, (item).b, (item).c, (item).e from cte1;
+explain (costs off) with cte1 as (select * from comp_table where (item).c>10) select id, (item).a, (item).b, (item).c, (item).e from cte1;
+
+-- verify the query output by using a composite type in a  subquery
+select (item).a from comp_table where (item).c=10 and (item).e IN (SELECT (item).e FROM comp_table WHERE (item).c = 10);
+explain (costs off) select (item).a from comp_table where (item).c=10 and (item).e IN (SELECT (item).e FROM comp_table WHERE (item).c = 10);
+
+-- verify the query output by using a composite type in a partition table query
+select (x.item).a from comp_part x join comp_part y on (X.item).c=(Y.item).c;
+explain (costs off) select (x.item).a from comp_part x join comp_part y on (X.item).c=(Y.item).c;
+
+-- clean up
+drop table comp_table;
+drop table comp_part;
+drop type comp_type;
+
 -- the query with empty CTE producer target list should fall back to Postgres
 -- optimizer without any error on build without asserts
 drop table if exists empty_cte_tl_test;
@@ -3499,6 +3565,154 @@ insert into array_coerce_bar values (1, ARRAY['abcde']);
 explain insert into array_coerce_foo select * from array_coerce_bar;
 insert into array_coerce_foo select * from array_coerce_bar;
 
+-- These testcases will fallback to postgres when "PexprConvert2In" is enabled if
+-- underlying issues are not fixed
+create table baz (a int,b int);
+explain select baz.* from baz where
+baz.a=1 OR
+baz.b = 1 OR baz.b = 2 OR baz.b = 3 OR baz.b = 4 OR baz.b = 5 OR baz.b = 6 OR baz.b = 7 OR baz.b = 8 OR baz.b = 9 OR baz.b = 10 OR
+baz.b = 11 OR baz.b = 12 OR baz.b = 13 OR baz.b = 14 OR baz.b = 15 OR baz.b = 16 OR baz.b = 17 OR baz.b = 18 OR baz.b = 19 OR baz.b = 20;
+drop table baz;
+create table baz ( a varchar);
+explain select * from baz where baz.a::bpchar='b' or baz.a='c';
+drop table baz;
+
+-- While retrieving the columns width in partitioned tables, inherited stats i.e.
+-- stats that cover all the child tables should be used
+
+-- start_ignore
+create language plpython3u;
+-- end_ignore
+create or replace function check_col_width(query text, operator text, width text) returns int as
+$$
+rv = plpy.execute('EXPLAIN '+ query)
+search_text_1 = operator
+search_text_2 = width
+result = 0
+for i in range(len(rv)):
+    cur_line = rv[i]['QUERY PLAN']
+    if search_text_1 in cur_line and search_text_2 in cur_line:
+        result = result+1
+return result
+$$
+language plpython3u;
+
+create table testPartWidth (a numeric(7,2), b numeric(7,2)) distributed by (a)
+partition by range(a) (start(0.0) end(4.0) every(2.0));
+insert into testPartWidth values (0.001,0.001),(2.123,2.123);
+analyze testPartWidth;
+
+--------------------------------------------------------------------------------
+-- The below query shows the column width of 'a' and 'b'
+-- select attname,avg_width from pg_stats where tablename='testPartWidth';
+-- attname | avg_width
+-- ---------+-----------
+--  a       |         5
+--  b       |         5
+--------------------------------------------------------------------------------
+select check_col_width('select a from testPartWidth;','Dynamic Seq Scan','width=5') = 1;
+select check_col_width('select b from testPartWidth;','Dynamic Seq Scan','width=5') = 1;
+select check_col_width('select a from testPartWidth;','Append','width=5') = 1;
+select check_col_width('select a from testPartWidth;','Append','width=5') = 1;
+drop function check_col_width(query text, operator text, width text);
+
+---------------------------------------------------------------------------------
+-- Test cast from INT[] to TEXT[]
+CREATE TABLE array_coerceviaio(a INT[]) distributed randomly;
+INSERT INTO array_coerceviaio values(ARRAY[1, 2, 3]);
+
+EXPLAIN SELECT CAST(a AS TEXT[]) FROM array_coerceviaio;
+SELECT CAST(a AS TEXT[]) FROM array_coerceviaio;
+
+---------------------------------------------------------------------------------
+DROP TABLE IF EXISTS schema_test_table;
+CREATE TABLE schema_test_table(a numeric, b numeric(5,2), c char(10) NOT NULL) distributed by (a);
+-- In 7x, redundant Result nodes in planned_stmt are being removed by ORCA,
+-- which caused the loss of typmod info of column type in plan.
+-- Below query is used by external libraries to fetch schema of table.
+-- Test that the typmod of column type is correct in explain plan.
+EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM schema_test_table WHERE 1=0;
+---------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------
+-- Test ALL NULL scalar array compare 
+create table DatumSortedSet_core (a int, b character varying NOT NULL) distributed by (a);
+explain select * from DatumSortedSet_core where b in (NULL, NULL);
+---------------------------------------------------------------------------------
+
+-- Test fill argtypes of PopAggFunc
+-- start_ignore
+drop table if exists foo;
+drop table if exists bar;
+-- end_ignore
+
+set optimizer_enable_eageragg = on;
+create table foo (j1 int, g1 int, s1 int);
+insert into foo select i%10, i %10, i from generate_series(1,100) i;
+create table bar (j2 int, g2 int, s2 int);
+insert into bar select i%1, i %10, i from generate_series(1,10) i;
+analyze foo;
+analyze bar;
+
+explain (costs off) select max(s1) from foo inner join bar on j1 = j2 group by g1;
+drop table foo;
+drop table bar;
+reset optimizer_enable_eageragg;
+
+-- Testcases to validate the behavior of the GUC gp_max_system_slices
+
+-- start_ignore
+drop table if exists foo;
+drop table if exists bar;
+-- end_ignore
+
+create table foo (a int, b int) distributed by(a);
+create table bar (a int, b int) distributed by(a);
+
+-- gp_max_slices : 0 (unlimited) and gp_max_system_slices : 0 (unlimited)
+explain (costs off) select foo.a, foo.b from foo, bar where foo.b=bar.b;
+
+-- gp_max_slices : 1 and gp_max_system_slices : 0 (unlimited)
+-- Query should generate an error because the number of slices in the query exceeds the gp_max_slices
+set gp_max_slices=1;
+explain (costs off) select foo.a, foo.b from foo, bar where foo.b=bar.b;
+
+-- gp_max_slices : 0 (unlimited) and gp_max_system_slices : 1
+-- Query should generate an error because the number of slices in the query exceeds the gp_max_system_slices
+set gp_max_system_slices=1;
+reset gp_max_slices;
+explain (costs off) select foo.a, foo.b from foo, bar where foo.b=bar.b;
+reset gp_max_system_slices;
+
+-- Ensure that a regular user cannot set the GUC gp_max_system_slices
+create user ruser;
+set session authorization ruser;
+set gp_max_system_slices=10;
+reset session authorization;
+
+-- Test that set returning function with multiple columns works with explain
+CREATE FUNCTION srf_attnum() RETURNS TABLE(v1 int, v2 int)
+    LANGUAGE plpgsql NO SQL
+    AS $_$
+BEGIN
+    DROP TABLE IF EXISTS tbl_2_cols;
+    CREATE TEMP TABLE tbl_2_cols (col1 int, col2 int) DISTRIBUTED RANDOMLY;
+    RETURN QUERY SELECT * from tbl_2_cols;
+END;
+$_$;
+explain select distinct v1 from srf_attnum();
+select distinct v1 from srf_attnum();
+explain select distinct v2 from srf_attnum();
+select distinct v2 from srf_attnum();
+
+drop user ruser;
+drop table foo, bar;
+
+-- ensure shared scan producer returns 0 rows
+create table cte_test(a int);
+insert into cte_test select i from generate_series(1,10)i;
+analyze cte_test;
+explain (analyze, costs off, summary off, timing off) with cte as (select * from cte_test) select * from cte union all select * from cte;
 -- start_ignore
 DROP SCHEMA orca CASCADE;
 -- end_ignore

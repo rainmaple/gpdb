@@ -1086,6 +1086,7 @@ IpcSemaphoreId
 IpcSemaphoreKey
 IsForeignRelUpdatable_function
 IsForeignScanParallelSafe_function
+IsMPPPlanNeeded_function
 IspellDict
 Item
 ItemId
@@ -1508,6 +1509,7 @@ PGresAttValue
 PGresParamDesc
 PGresult
 PGresult_data
+PgArchData
 PHANDLE
 PLAINTREE
 PLTemplate

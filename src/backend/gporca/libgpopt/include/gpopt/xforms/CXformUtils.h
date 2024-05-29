@@ -17,12 +17,16 @@
 #include "gpopt/base/CColRef.h"
 #include "gpopt/base/COptCtxt.h"
 #include "gpopt/base/CUtils.h"
+#include "gpopt/hints/CHintUtils.h"
 #include "gpopt/operators/CLogicalDML.h"
 #include "gpopt/operators/CLogicalDynamicIndexGet.h"
+#include "gpopt/operators/CLogicalDynamicIndexOnlyGet.h"
 #include "gpopt/operators/CLogicalIndexGet.h"
+#include "gpopt/operators/CLogicalIndexOnlyGet.h"
 #include "gpopt/operators/CLogicalJoin.h"
 #include "gpopt/operators/CPhysicalJoin.h"
 #include "gpopt/operators/CPredicateUtils.h"
+#include "gpopt/optimizer/COptimizerConfig.h"
 #include "gpopt/xforms/CXform.h"
 #include "naucrates/md/IMDIndex.h"
 #include "naucrates/md/IMDScalarOp.h"
@@ -37,7 +41,6 @@ class CColRefSet;
 class CExpression;
 class CLogical;
 class CLogicalDynamicGet;
-class CPartConstraint;
 class CTableDescriptor;
 
 // map of expression to array of expressions
@@ -66,13 +69,6 @@ using CExpressionArrays = CDynamicPtrArray<CExpressionArray, CleanupRelease>;
 class CXformUtils
 {
 private:
-	// enum marking the index column types
-	enum EIndexCols
-	{
-		EicKey,
-		EicIncluded
-	};
-
 	// create a logical assert for the not nullable columns of the given table
 	// on top of the given child expression
 	static CExpression *PexprAssertNotNull(CMemoryPool *mp,
@@ -95,16 +91,21 @@ private:
 	static CColRefSet *PcrsIndexColumns(CMemoryPool *mp,
 										CColRefArray *colref_array,
 										const IMDIndex *pmdindex,
-										const IMDRelation *pmdrel,
-										EIndexCols eic);
+										const IMDRelation *pmdrel);
+
+	// return the set of columns from the given array of columns which are
+	// returnable through the index (to determine index-only scan capable)
+	static CColRefSet *PcrsIndexReturnableColumns(CMemoryPool *mp,
+												  CColRefArray *colref_array,
+												  const IMDIndex *pmdindex,
+												  const IMDRelation *pmdrel);
 
 	// return the ordered array of columns from the given array of columns which appear
 	// in the index included / key columns
 	static CColRefArray *PdrgpcrIndexColumns(CMemoryPool *mp,
 											 CColRefArray *colref_array,
 											 const IMDIndex *pmdindex,
-											 const IMDRelation *pmdrel,
-											 EIndexCols eic);
+											 const IMDRelation *pmdrel);
 
 	// lookup join keys in scalar child group
 	static void LookupJoinKeys(CMemoryPool *mp, CExpression *pexpr,
@@ -178,40 +179,33 @@ private:
 									   CColRefSet *pcrsGrpByOutput,
 									   CColRefSet *pcrsGrpByUsed,
 									   CColRefSet *pcrsFKey);
-
-	// construct an expression representing a new access path using the given functors for
-	// operator constructors and rewritten access path
-	static CExpression *PexprBuildBtreeIndexPlan(
-		CMemoryPool *mp, CMDAccessor *md_accessor, CExpression *pexprGet,
-		ULONG ulOriginOpId, CExpressionArray *pdrgpexprConds,
-		CColRefSet *pcrsReqd, CColRefSet *pcrsScalarExpr,
-		CColRefSet *outer_refs, const IMDIndex *pmdindex,
-		const IMDRelation *pmdrel);
-
 	// create a dynamic operator for a btree index plan
+	template <class T>
 	static CLogical *
-	PopDynamicBtreeIndexOpConstructor(CMemoryPool *mp, const IMDIndex *pmdindex,
-									  CTableDescriptor *ptabdesc,
-									  ULONG ulOriginOpId, CName *pname,
-									  ULONG ulPartIndex,
-									  CColRefArray *pdrgpcrOutput,
-									  CColRef2dArray *pdrgpdrgpcrPart,
-									  IMdIdArray *partition_mdids)
+	PopDynamicBtreeIndexOpConstructor(
+		CMemoryPool *mp, const IMDIndex *pmdindex, CTableDescriptor *ptabdesc,
+		ULONG ulOriginOpId, CName *pname, ULONG ulPartIndex,
+		CColRefArray *pdrgpcrOutput, CColRef2dArray *pdrgpdrgpcrPart,
+		IMdIdArray *partition_mdids, ULONG ulUnindexedPredColCount)
 	{
-		return GPOS_NEW(mp) CLogicalDynamicIndexGet(
-			mp, pmdindex, ptabdesc, ulOriginOpId, pname, ulPartIndex,
-			pdrgpcrOutput, pdrgpdrgpcrPart, partition_mdids);
+		return GPOS_NEW(mp) T(mp, pmdindex, ptabdesc, ulOriginOpId, pname,
+							  ulPartIndex, pdrgpcrOutput, pdrgpdrgpcrPart,
+							  partition_mdids, ulUnindexedPredColCount);
 	}
 
 	//	create a static operator for a btree index plan
+	template <class T>
 	static CLogical *
 	PopStaticBtreeIndexOpConstructor(CMemoryPool *mp, const IMDIndex *pmdindex,
 									 CTableDescriptor *ptabdesc,
 									 ULONG ulOriginOpId, CName *pname,
-									 CColRefArray *pdrgpcrOutput)
+									 CColRefArray *pdrgpcrOutput,
+									 ULONG ulUnindexedPredColCount,
+									 EIndexScanDirection indexScanDirection)
 	{
-		return GPOS_NEW(mp) CLogicalIndexGet(
-			mp, pmdindex, ptabdesc, ulOriginOpId, pname, pdrgpcrOutput);
+		return GPOS_NEW(mp)
+			T(mp, pmdindex, ptabdesc, ulOriginOpId, pname, pdrgpcrOutput,
+			  ulUnindexedPredColCount, indexScanDirection);
 	}
 
 	//	produce an expression representing a new btree index path
@@ -248,9 +242,9 @@ private:
 	static CExpression *PexprBitmapSelectBestIndex(
 		CMemoryPool *mp, CMDAccessor *md_accessor, CExpression *pexprPred,
 		CTableDescriptor *ptabdesc, const IMDRelation *pmdrel,
-		CColRefArray *pdrgpcrOutput, CColRefSet *pcrsReqd,
-		CColRefSet *pcrsOuterRefs, CExpression **ppexprRecheck,
-		CExpression **ppexprResidual, BOOL alsoConsiderBTreeIndexes);
+		CColRefArray *pdrgpcrOutput, CColRefSet *pcrsOuterRefs,
+		CExpression **ppexprRecheck, CExpression **ppexprResidual,
+		BOOL alsoConsiderOtherIndexes);
 
 	// iterate over given hash map and return array of arrays of project elements sorted by the column id of the first entries
 	static CExpressionArrays *PdrgpdrgpexprSortedPrjElemsArray(
@@ -388,19 +382,12 @@ public:
 									 const IMDIndex *pmdindex,
 									 const IMDRelation *pmdrel);
 
-	// return the set of key columns from the given array of columns which appear
-	// in the index included columns
-	static CColRefSet *PcrsIndexIncludedCols(CMemoryPool *mp,
-											 CColRefArray *colref_array,
-											 const IMDIndex *pmdindex,
-											 const IMDRelation *pmdrel);
-
 	// check if an index is applicable given the required, output and scalar
 	// expression columns
 	static BOOL FIndexApplicable(
 		CMemoryPool *mp, const IMDIndex *pmdindex, const IMDRelation *pmdrel,
-		CColRefArray *pdrgpcrOutput, CColRefSet *pcrsReqd,
-		CColRefSet *pcrsScalar, IMDIndex::EmdindexType emdindtype,
+		CColRefArray *pdrgpcrOutput, CColRefSet *pcrsScalar,
+		IMDIndex::EmdindexType emdindtype,
 		IMDIndex::EmdindexType altindtype = IMDIndex::EmdindSentinel);
 
 	// check whether a CTE should be inlined
@@ -437,19 +424,6 @@ public:
 			   CXform::ExfSubqJoin2Apply == exfid ||
 			   CXform::ExfSubqNAryJoin2Apply == exfid ||
 			   CXform::ExfSequenceProject2Apply == exfid;
-	}
-
-	// helper for creating IndexGet/DynamicIndexGet expression
-	static CExpression *
-	PexprLogicalIndexGet(CMemoryPool *mp, CMDAccessor *md_accessor,
-						 CExpression *pexprGet, ULONG ulOriginOpId,
-						 CExpressionArray *pdrgpexprConds, CColRefSet *pcrsReqd,
-						 CColRefSet *pcrsScalarExpr, CColRefSet *outer_refs,
-						 const IMDIndex *pmdindex, const IMDRelation *pmdrel)
-	{
-		return PexprBuildBtreeIndexPlan(
-			mp, md_accessor, pexprGet, ulOriginOpId, pdrgpexprConds, pcrsReqd,
-			pcrsScalarExpr, outer_refs, pmdindex, pmdrel);
 	}
 
 	// helper for creating bitmap bool op expressions
@@ -571,6 +545,27 @@ public:
 		CMemoryPool *mp, CExpression *lowerPartOfExpr, CExpression *topOfStack,
 		CExpression *exclusiveBottomOfStack);
 
+	static BOOL FCoverIndex(CMemoryPool *mp, CIndexDescriptor *pindexdesc,
+							CTableDescriptor *ptabdesc,
+							CColRefArray *pdrgpcrOutput);
+
+	static void ComputeOrderSpecForIndexKey(CMemoryPool *mp,
+											COrderSpec **order_spec,
+											const IMDIndex *pmdindex,
+											EIndexScanDirection scan_direction,
+											const CColRef *colref,
+											ULONG key_position);
+
+	// construct an expression representing a new access path using the given functors for
+	// operator constructors and rewritten access path
+	static CExpression *PexprBuildBtreeIndexPlan(
+		CMemoryPool *mp, CMDAccessor *md_accessor, CExpression *pexprGet,
+		ULONG ulOriginOpId, CExpressionArray *pdrgpexprConds,
+		CColRefSet *pcrsScalarExpr, CColRefSet *outer_refs,
+		const IMDIndex *pmdindex, const IMDRelation *pmdrel,
+		EIndexScanDirection indexScanDirection, BOOL indexForOrderBy,
+		BOOL indexonly);
+
 };	// class CXformUtils
 
 
@@ -617,8 +612,17 @@ CXformUtils::TransformImplementBinaryOp(CXformContext *pxfctxt,
 				COperator::EopPhysicalLeftAntiSemiNLJoin == op_id ||
 				COperator::EopPhysicalLeftAntiSemiNLJoinNotIn == op_id);
 
-	// add alternative to results
-	pxfres->Add(pexprBinary);
+	if (!CHintUtils::SatisfiesJoinTypeHints(
+			mp, pexprBinary,
+			COptCtxt::PoctxtFromTLS()->GetOptimizerConfig()->GetPlanHint()))
+	{
+		pexprBinary->Release();
+	}
+	else
+	{
+		// add alternative to results
+		pxfres->Add(pexprBinary);
+	}
 }
 
 template <class T>
@@ -644,7 +648,16 @@ CXformUtils::AddHashOrMergeJoinAlternative(
 					   is_hash_join_null_aware, popLogicalJoin->OriginXform());
 	CExpression *pexprResult = GPOS_NEW(mp)
 		CExpression(mp, op, (*pexprJoin)[0], (*pexprJoin)[1], (*pexprJoin)[2]);
-	pxfres->Add(pexprResult);
+	if (!CHintUtils::SatisfiesJoinTypeHints(
+			mp, pexprResult,
+			COptCtxt::PoctxtFromTLS()->GetOptimizerConfig()->GetPlanHint()))
+	{
+		pexprResult->Release();
+	}
+	else
+	{
+		pxfres->Add(pexprResult);
+	}
 }
 
 
@@ -727,6 +740,7 @@ CXformUtils::ImplementHashJoin(CXformContext *pxfctxt, CXformResult *pxfres,
 
 	if (GPOS_FTRACE(EopttraceConsiderOpfamiliesForDistribution))
 	{
+		CRefCount::SafeRelease(join_opfamilies);
 		join_opfamilies = GPOS_NEW(mp) IMdIdArray(mp);
 	}
 
@@ -822,6 +836,7 @@ CXformUtils::ImplementMergeJoin(CXformContext *pxfctxt, CXformResult *pxfres,
 	if (nullptr != pdrgpexprOuter)
 	{
 		GPOS_ASSERT(nullptr != pdrgpexprInner);
+		CRefCount::SafeRelease(join_opfamilies);
 		if (0 == pdrgpexprOuter->Size())
 		{
 			GPOS_ASSERT(0 == pdrgpexprInner->Size());
@@ -830,14 +845,14 @@ CXformUtils::ImplementMergeJoin(CXformContext *pxfctxt, CXformResult *pxfres,
 			// no reason to try to do the same again
 			pdrgpexprOuter->Release();
 			pdrgpexprInner->Release();
-			CRefCount::SafeRelease(join_opfamilies);
 		}
 		else
 		{
 			// we have computed join keys on scalar child before, reuse them
-			AddHashOrMergeJoinAlternative<T>(
-				mp, pexpr, pdrgpexprOuter, pdrgpexprInner, join_opfamilies,
-				pxfres, true /*is_hash_join_null_aware*/);
+			AddHashOrMergeJoinAlternative<T>(mp, pexpr, pdrgpexprOuter,
+											 pdrgpexprInner,
+											 nullptr /* opfamilies */, pxfres,
+											 true /*is_hash_join_null_aware*/);
 		}
 
 		return;
@@ -854,6 +869,7 @@ CXformUtils::ImplementMergeJoin(CXformContext *pxfctxt, CXformResult *pxfres,
 
 	if (GPOS_FTRACE(EopttraceConsiderOpfamiliesForDistribution))
 	{
+		CRefCount::SafeRelease(join_opfamilies);
 		join_opfamilies = GPOS_NEW(mp) IMdIdArray(mp);
 	}
 
@@ -919,8 +935,8 @@ CXformUtils::ImplementMergeJoin(CXformContext *pxfctxt, CXformResult *pxfres,
 	if (0 != pdrgpexprOuter->Size())
 	{
 		AddHashOrMergeJoinAlternative<T>(
-			mp, pexprResult, pdrgpexprOuter, pdrgpexprInner, join_opfamilies,
-			pxfres, true /*is_hash_join_null_aware*/);
+			mp, pexprResult, pdrgpexprOuter, pdrgpexprInner,
+			nullptr /* opfamilies */, pxfres, true /*is_hash_join_null_aware*/);
 	}
 	else
 	{

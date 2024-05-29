@@ -21,18 +21,27 @@ logger = gplog.get_default_logger()
 class GPCatalogException(Exception):
     pass
 
-# Hard coded since "coordinator only" is not defined in the catalog
-COORDINATOR_ONLY_TABLES = [
+
+# The following lists capture "coordinator only" tables. They are hard-coded
+# since there is no notion of "coordinator only" defined in the catalog.
+# Depending on whether a relation is mapped or not, we have 2 sub-lists.
+# See RelationIsMapped().
+COORDINATOR_ONLY_TABLES_MAPPED = [
     'gp_configuration_history',
     'gp_segment_configuration',
+    'pg_stat_last_shoperation'
+]
+
+COORDINATOR_ONLY_TABLES_NON_MAPPED = [
     'pg_stat_last_operation',
-    'pg_stat_last_shoperation',
     'pg_statistic',
     'pg_statistic_ext',
     'pg_statistic_ext_data',
     'gp_partition_template',
-	'pg_event_trigger'
-    ]
+    'pg_event_trigger'
+]
+
+COORDINATOR_ONLY_TABLES = COORDINATOR_ONLY_TABLES_MAPPED + COORDINATOR_ONLY_TABLES_NON_MAPPED
 
 # Hard coded tables that have different values on every segment
 SEGMENT_LOCAL_TABLES = [
@@ -47,6 +56,7 @@ SEGMENT_LOCAL_TABLES = [
 # catalog table
 DEPENDENCY_EXCLUSION = [
     'pg_authid',
+    'pg_collation',
     'pg_compression',
     'pg_conversion',
     'pg_database',
@@ -58,7 +68,9 @@ DEPENDENCY_EXCLUSION = [
     'pg_resourcetype',
     'pg_resqueue',
     'pg_resqueuecapability',
-    'pg_tablespace'
+    'pg_subscription',
+    'pg_tablespace',
+    'pg_transform'
     ]
 
 # ============================================================================
@@ -141,7 +153,7 @@ class GPCatalog():
             curs = self._query(version_query)
         except Exception as e:
             raise GPCatalogException("Error reading database version: " + str(e))
-        self._version = GpVersion(curs.getresult()[0][0])
+        self._version = GpVersion(curs.fetchone()[0])
 
         # Read the list of catalog tables from the database
         try:
@@ -151,7 +163,7 @@ class GPCatalog():
 
         # Construct our internal representation of the catalog
         
-        for [oid, relname, relisshared] in curs.getresult():
+        for [oid, relname, relisshared] in curs.fetchall():
             self._tables[relname] = GPCatalogTable(self, relname)
             # Note: stupid API returns t/f for boolean value
             self._tables[relname]._setShared(relisshared == 't')
@@ -190,7 +202,9 @@ class GPCatalog():
         """
         Simple wrapper around querying the database connection
         """
-        return self._dbConnection.query(qry)
+        cur = self._dbConnection.cursor()
+        cur.execute(qry)
+        return cur
 
     def _markCoordinatorOnlyTables(self):
         """
@@ -480,10 +494,10 @@ class GPCatalogTable():
             # exist.
             raise GPCatalogException("Catalog table %s does not exist" % name)
 
-        if cur.ntuples() == 0:
+        if cur.rowcount == 0:
             raise GPCatalogException("Catalog table %s does not exist" % name)
 
-        for row in cur.getresult():
+        for row in cur.fetchall():
             (attname, atttype, typname) = row
 
             # Mark if the catalog has an oid column
@@ -519,7 +533,7 @@ class GPCatalogTable():
             WHERE attrelid = 'pg_catalog.{catname}'::regclass
             """.format(catname=name)
             cur = parent._query(qry)
-            self._pkey = [row[0] for row in cur.getresult()]
+            self._pkey = [row[0] for row in cur.fetchall()]
 
         # Primary key must be in the column list
         for k in self._pkey:

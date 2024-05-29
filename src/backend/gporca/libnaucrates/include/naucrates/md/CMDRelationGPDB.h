@@ -62,6 +62,9 @@ private:
 	// storage type
 	Erelstoragetype m_rel_storage_type;
 
+	// append only table version
+	Erelaoversion m_rel_ao_version;
+
 	// distribution policy
 	Ereldistrpolicy m_rel_distr_policy;
 
@@ -119,22 +122,23 @@ private:
 	// array of column widths including dropped columns
 	CDoubleArray *m_col_width_array;
 
+	// rows
+	CDouble m_rows;
+
 public:
 	CMDRelationGPDB(const CMDRelationGPDB &) = delete;
 
 	// ctor
-	CMDRelationGPDB(CMemoryPool *mp, IMDId *mdid, CMDName *mdname,
-					BOOL is_temp_table, Erelstoragetype rel_storage_type,
-					Ereldistrpolicy rel_distr_policy,
-					CMDColumnArray *mdcol_array, ULongPtrArray *distr_col_array,
-					IMdIdArray *distr_opfamilies,
-					ULongPtrArray *partition_cols_array,
-					CharPtrArray *str_part_types_array,
-					IMdIdArray *partition_oids, BOOL convert_hash_to_random,
-					ULongPtr2dArray *keyset_array,
-					CMDIndexInfoArray *md_index_info_array,
-					IMdIdArray *mdid_check_constraint_array,
-					CDXLNode *mdpart_constraint, IMDId *foreign_server);
+	CMDRelationGPDB(
+		CMemoryPool *mp, IMDId *mdid, CMDName *mdname, BOOL is_temp_table,
+		Erelstoragetype rel_storage_type, Erelaoversion rel_ao_version,
+		Ereldistrpolicy rel_distr_policy, CMDColumnArray *mdcol_array,
+		ULongPtrArray *distr_col_array, IMdIdArray *distr_opfamilies,
+		ULongPtrArray *partition_cols_array, CharPtrArray *str_part_types_array,
+		IMdIdArray *partition_oids, BOOL convert_hash_to_random,
+		ULongPtr2dArray *keyset_array, CMDIndexInfoArray *md_index_info_array,
+		IMdIdArray *mdid_check_constraint_array, CDXLNode *mdpart_constraint,
+		IMDId *foreign_server, CDouble rows);
 
 	// dtor
 	~CMDRelationGPDB() override;
@@ -153,6 +157,9 @@ public:
 
 	// storage type (heap, appendonly, ...)
 	Erelstoragetype RetrieveRelStorageType() const override;
+
+	// append only table version
+	Erelaoversion GetRelAOVersion() const override;
 
 	// distribution policy (none, hash, random)
 	Ereldistrpolicy GetRelDistribution() const override;
@@ -238,6 +245,8 @@ public:
 	IMdIdArray *ChildPartitionMdids() const override;
 
 	IMDId *ForeignServer() const override;
+
+	CDouble Rows() const override;
 
 #ifdef GPOS_DEBUG
 	// debug print of the metadata relation

@@ -47,7 +47,6 @@ class CgroupValidationVersionTwo(CgroupValidation):
         self.validate_permission("gpdb/cgroup.procs", "rw")
 
         self.validate_permission("gpdb/cpu.max", "rw")
-        self.validate_permission("gpdb/cpu.pressure", "rw")
         self.validate_permission("gpdb/cpu.weight", "rw")
         self.validate_permission("gpdb/cpu.weight.nice", "rw")
         self.validate_permission("gpdb/cpu.stat", "r")
@@ -59,6 +58,8 @@ class CgroupValidationVersionTwo(CgroupValidation):
         self.validate_permission("gpdb/cpuset.mems.effective", "r")
 
         self.validate_permission("gpdb/memory.current", "r")
+
+        self.validate_permission("gpdb/io.max", "rw")
 
     def die(self, msg):
         raise ValidationException("cgroup is not properly configured: {}".format(msg))

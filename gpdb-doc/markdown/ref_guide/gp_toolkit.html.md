@@ -1,43 +1,60 @@
 # The gp\_toolkit Administrative Schema 
 
-Greenplum Database provides an administrative schema called `gp_toolkit` that you can use to query the system catalogs, log files, and operating environment for system status information. The `gp_toolkit` schema contains a number of views that you can access using SQL commands. The `gp_toolkit` schema is accessible to all database users, although some objects may require superuser permissions. For convenience, you may want to add the `gp_toolkit` schema to your schema search path. For example:
+VMware Greenplum provides an administrative schema called `gp_toolkit` that you can use to query the system catalogs, log files, and operating environment for system status information. The `gp_toolkit` schema contains a number of views that you can access using SQL commands. The `gp_toolkit` schema is accessible to all database users, although some objects may require superuser permissions. For convenience, you may want to add the `gp_toolkit` schema to your schema search path. For example:
 
 ```
 => ALTER ROLE myrole SET search_path TO myschema,gp_toolkit;
 ```
 
-This documentation describes the most useful views in `gp_toolkit`. You may notice other objects \(views, functions, and external tables\) within the `gp_toolkit` schema that are not described in this documentation \(these are supporting objects to the views described in this section\).
+This documentation describes the most useful views and user-defined functions (UDFs) in `gp_toolkit`. You may notice other objects (views, functions, and external tables) within the `gp_toolkit` schema that are not described in this documentation (these are supporting objects to the views described in this section).
 
 > **Caution** Do not change database objects in the gp\_toolkit schema. Do not create database objects in the schema. Changes to objects in the schema might affect the accuracy of administrative information returned by schema objects. Any changes made in the gp\_toolkit schema are lost when the database is backed up and then restored with the `gpbackup` and `gprestore` utilities.
 
 These are the categories for views in the `gp_toolkit` schema.
 
--   **[Checking for Tables that Need Routine Maintenance](gp_toolkit.html)**  
+-   **[Checking for Tables that Need Routine Maintenance](gp_toolkit.html#topic2)**  
 
--   **[Checking for Locks](gp_toolkit.html)**  
+-   **[Checking for Locks](gp_toolkit.html#topic5)**  
 
--   **[Checking Append-Optimized Tables](gp_toolkit.html)**  
+-   **[Checking Append-Optimized Tables](gp_toolkit.html#topic8)**  
 
--   **[Viewing Greenplum Database Server Log Files](gp_toolkit.html)**  
+-   **[Viewing VMware Greenplum Server Log Files](gp_toolkit.html#topic16)**  
 
--   **[Checking Server Configuration Files](gp_toolkit.html)**  
+-   **[Checking Server Configuration Files](gp_toolkit.html#topic21)**  
 
--   **[Checking for Failed Segments](gp_toolkit.html)**  
+-   **[Checking for Failed Segments](gp_toolkit.html#topic24)**  
 
--   **[Checking Resource Group Activity and Status](gp_toolkit.html)**  
+-   **[Checking Resource Group Activity and Status](gp_toolkit.html#topic26x)**  
 
--   **[Checking Resource Queue Activity and Status](gp_toolkit.html)**  
+-   **[Checking Resource Queue Activity and Status](gp_toolkit.html#topic26)**  
 
--   **[Checking Query Disk Spill Space Usage](gp_toolkit.html)**  
+-   **[Checking Query Disk Spill Space Usage](gp_toolkit.html#topic32)**  
 
--   **[Viewing Users and Groups \(Roles\)](gp_toolkit.html)**  
+-   **[Viewing Users and Groups \(Roles\)](gp_toolkit.html#topic36)**  
 
--   **[Checking Database Object Sizes and Disk Space](gp_toolkit.html)**  
+-   **[Checking Database Object Sizes and Disk Space](gp_toolkit.html#topic38)**  
 
--   **[Checking for Uneven Data Distribution](gp_toolkit.html)**  
+-   **[Checking for Missing and Orphaned Data Files](gp_toolkit.html#missingfiles)**  
 
+-   **[Moving Orphaned Data Files](gp_toolkit.html#moveorphanfiles)**  
 
-**Parent topic:** [Greenplum Database Reference Guide](ref_guide.html)
+-   **[Checking for Uneven Data Distribution](gp_toolkit.html#topic49)**  
+
+-   **[Maintaining Partitions](gp_toolkit.html#maintainingpartitions)**
+
+## <a id="about"></a>About the Extension
+
+`gp_toolkit` is implemented as an extension in Greenplum 7. Because this extension is registered in the `template1` database, it is both registered an immediately available to use in every Greenplum database that you create.
+
+## <a id="upgrade"></a>Upgrading the Extension
+
+The `gp_toolkit` extension is installed when you install or upgrade VMware Greenplum. A previous version of the extension will continue to work in existing databases after you upgrade Greenplum. To upgrade to the most recent version of the extension, you must:
+
+```
+ALTER EXTENSION gp_toolkit UPDATE TO '1.4';
+```
+
+in **every** database in which you use the extension.
 
 ## <a id="topic2"></a>Checking for Tables that Need Routine Maintenance 
 
@@ -46,9 +63,9 @@ The following views can help identify tables that need routine table maintenance
 -   [gp\_bloat\_diag](#topic3)
 -   [gp\_stats\_missing](#topic4)
 
-The `VACUUM` or `VACUUM FULL` command reclaims disk space occupied by deleted or obsolete rows. Because of the MVCC transaction concurrency model used in Greenplum Database, data rows that are deleted or updated still occupy physical space on disk even though they are not visible to any new transactions. Expired rows increase table size on disk and eventually slow down scans of the table.
+The `VACUUM` or `VACUUM FULL` command reclaims disk space occupied by deleted or obsolete rows. Because of the MVCC transaction concurrency model used in VMware Greenplum, data rows that are deleted or updated still occupy physical space on disk even though they are not visible to any new transactions. Expired rows increase table size on disk and eventually slow down scans of the table.
 
-The `ANALYZE` command collects column-level statistics needed by the query optimizer. Greenplum Database uses a cost-based query optimizer that relies on database statistics. Accurate statistics allow the query optimizer to better estimate selectivity and the number of rows retrieved by a query operation in order to choose the most efficient query plan.
+The `ANALYZE` command collects column-level statistics needed by the query optimizer. VMware Greenplum uses a cost-based query optimizer that relies on database statistics. Accurate statistics allow the query optimizer to better estimate selectivity and the number of rows retrieved by a query operation in order to choose the most efficient query plan.
 
 **Parent topic:** [The gp\_toolkit Administrative Schema](gp_toolkit.html)
 
@@ -81,7 +98,7 @@ This view shows tables that do not have statistics and therefore may require an 
 
 ## <a id="topic5"></a>Checking for Locks 
 
-When a transaction accesses a relation \(such as a table\), it acquires a lock. Depending on the type of lock acquired, subsequent transactions may have to wait before they can access the same relation. For more information on the types of locks, see "Managing Data" in the *Greenplum Database Administrator Guide*. Greenplum Database resource queues \(used for resource management\) also use locks to control the admission of queries into the system.
+When a transaction accesses a relation \(such as a table\), it acquires a lock. Depending on the type of lock acquired, subsequent transactions may have to wait before they can access the same relation. For more information on the types of locks, see the [Managing Data](../admin_guide/managing_data.html)topic. VMware Greenplum resource queues \(used for resource management\) also use locks to control the admission of queries into the system.
 
 The `gp_locks_*` family of views can help diagnose queries and sessions that are waiting to access an object due to a lock.
 
@@ -92,7 +109,7 @@ The `gp_locks_*` family of views can help diagnose queries and sessions that are
 
 ### <a id="topic6"></a>gp\_locks\_on\_relation 
 
-This view shows any locks currently being held on a relation, and the associated session information about the query associated with the lock. For more information on the types of locks, see "Managing Data" in the *Greenplum Database Administrator Guide*. This view is accessible to all users, however non-superusers will only be able to see the locks for relations that they have permission to access.
+This view shows any locks currently being held on a relation, and the associated session information about the query associated with the lock. For more information on the types of locks, see the [Managing Data](../admin_guide/managing_data.html) topic. This view is accessible to all users, however non-superusers will only be able to see the locks for relations that they have permission to access.
 
 |Column|Description|
 |------|-----------|
@@ -140,7 +157,7 @@ For most of the functions, the input argument is `regclass`, either the table `n
 
 ### <a id="topic_ylp_gxw_yq"></a>\_\_gp\_aovisimap\_compaction\_info\(oid\) 
 
-This function displays compaction information for an append-optimized table. The information is for the on-disk data files on Greenplum Database segments that store the table data. You can use the information to determine the data files that will be compacted by a `VACUUM` operation on an append-optimized table.
+This function displays compaction information for an append-optimized table. The information is for the on-disk data files on database segments that store the table data. You can use the information to determine the data files that will be compacted by a `VACUUM` operation on an append-optimized table.
 
 > **Note** Until a VACUUM operation deletes the row from the data file, deleted or updated data rows occupy physical space on disk even though they are hidden to new transactions. The configuration parameter [gp\_appendonly\_compaction](config_params/guc-list.html) controls the functionality of the `VACUUM` command.
 
@@ -148,7 +165,7 @@ This table describes the \_\_gp\_aovisimap\_compaction\_info function output tab
 
 |Column|Description|
 |------|-----------|
-|content|Greenplum Database segment ID.|
+|content|Database segment ID.|
 |datafile|ID of the data file on the segment.|
 |compaction\_possible|The value is either `t` or `f`. The value `t` indicates that the data in data file be compacted when a VACUUM operation is performed.<br/><br/>The server configuration parameter `gp_appendonly_compaction_threshold` affects this value.|
 |hidden\_tupcount|In the data file, the number of hidden \(deleted or updated\) rows.|
@@ -344,13 +361,13 @@ This view shows a summary of the `gp_column_size` view. It aggregates the column
 | size_uncompressed | The size of the column in bytes if the column were uncompressed. |
 | compression_ratio | The compression ratio. |
 
-## <a id="topic16"></a>Viewing Greenplum Database Server Log Files 
+## <a id="topic16"></a>Viewing VMware Greenplum Server Log Files 
 
-Each component of a Greenplum Database system \(coordinator, standby coordinator, primary segments, and mirror segments\) keeps its own server log files. The `gp_log_*` family of views allows you to issue SQL queries against the server log files to find particular entries of interest. The use of these views require superuser permissions.
+Each component of a VMware Greenplum system \(coordinator, standby coordinator, primary segments, and mirror segments\) keeps its own server log files. The `gp_log_*` family of views allows you to issue SQL queries against the server log files to find particular entries of interest. The use of these views require superuser permissions.
 
 -   [gp\_log\_command\_timings](#topic17)
 -   [gp\_log\_database](#topic18)
--   [gp\_log\_master\_concise](#topic19)
+-   [gp\_log\_coordinator\_concise](#topic19)
 -   [gp\_log\_system](#topic20)
 
 **Parent topic:** [The gp\_toolkit Administrative Schema](gp_toolkit.html)
@@ -407,7 +424,7 @@ This view uses an external table to read the server log files of the entire Gree
 |logline|The line in the log file in which this message is generated.|
 |logstack|Full text of the stack trace associated with this message.|
 
-### <a id="topic19"></a>gp\_log\_master\_concise 
+### <a id="topic19"></a>gp\_log\_coordinator\_concise 
 
 This view uses an external table to read a subset of the log fields from the coordinator log file. The use of this view requires superuser permissions.
 
@@ -459,7 +476,7 @@ This view uses an external table to read the server log files of the entire Gree
 
 ## <a id="topic21"></a>Checking Server Configuration Files 
 
-Each component of a Greenplum Database system \(coordinator, standby coordinator, primary segments, and mirror segments\) has its own server configuration file \(`postgresql.conf`\). The following `gp_toolkit` objects can be used to check parameter settings across all primary `postgresql.conf` files in the system:
+Each component of a VMware Greenplum system \(coordinator, standby coordinator, primary segments, and mirror segments\) has its own server configuration file \(`postgresql.conf`\). The following `gp_toolkit` objects can be used to check parameter settings across all primary `postgresql.conf` files in the system:
 
 -   [gp\_param\_setting\('parameter\_name'\)](#topic22)
 -   [gp\_param\_settings\_seg\_value\_diffs](#topic23)
@@ -514,14 +531,14 @@ This view shows information about segments that are marked as down in the system
 
 > **Note** The resource group activity and status views described in this section are valid only when resource group-based resource management is active.
 
-Resource groups manage transactions to avoid exhausting system CPU and memory resources. Every database user is assigned a resource group. Greenplum Database evaluates every transaction submitted by a user against the limits configured for the user's resource group before running the transaction.
+Resource groups manage transactions to avoid exhausting system CPU and memory resources. Every database user is assigned a resource group. VMware Greenplum evaluates every transaction submitted by a user against the limits configured for the user's resource group before running the transaction.
 
 You can use the `gp_resgroup_config` view to check the configuration of each resource group. You can use the `gp_resgroup_status*` views to display the current transaction status and resource usage of each resource group.
 
 -   [gp\_resgroup\_config](#topic27x)
+-   [gp_resgroup_role](#role)
 -   [gp\_resgroup\_status](#topic31x)
 -   [gp\_resgroup\_status\_per\_host](#perhost)
--   [gp\_resgroup\_status\_per\_segment](#perseg)
 
 **Parent topic:** [The gp\_toolkit Administrative Schema](gp_toolkit.html)
 
@@ -536,18 +553,29 @@ This view is accessible to all users.
 |groupid|The ID of the resource group.|
 |groupname|The name of the resource group.|
 |concurrency|The concurrency \(`CONCURRENCY`\) value specified for the resource group.|
-|cpu\_rate\_limit|The CPU limit \(`cpu_hard_quota_limit`\) value specified for the resource group, or -1.|
-|memory\_limit|The memory limit \(`MEMORY_LIMIT`\) value specified for the resource group.|
-|memory\_shared\_quota|The shared memory quota \(`MEMORY_SHARED_QUOTA`\) value specified for the resource group.|
-|memory\_spill\_ratio|The memory spill ratio \(`MEMORY_SPILL_RATIO`\) value specified for the resource group.|
-|memory\_auditor|The memory auditor for the resource group.|
-|cpuset|The CPU cores reserved for the resource group on the coordinator host and segment hosts, or -1.|
+|cpu\_max\_percent|The CPU limit \(`CPU_MAX_PERCENT`\) value specified for the resource group, or -1.|
+|cpu\_weight|The scheduling priority of the resource group (CPU_WEIGHT).|
+|cpuset|The CPU cores reserved for the resource group (CPUSET), or -1.|
+|memory\_quota|The memory quota \(`MEMORY_QUOTA`\) value specified for the resource group.|
+|min\_cost|The minimum cost of a query plan to be included in the resource group (MIN_COST).|
+|io\_limit|The maximum read/write sequential disk I/O throughput, and the maximum read/write I/O operations per second for the queries assigned to a specific tablespace (shown as the tablespace oid) and resource group (IO_LIMIT).|
+
+### <a id="role"></a>gp\_resgroup\_role
+
+The `gp_resgroup_role` view allows administrators to see the resource group assigned to every role.
+
+This view is accessible to all users.
+
+|Column|Description|
+|------|-----------|
+|rrrolname|The name of the role|
+|rrrsgname|The name of the resource group|
 
 ### <a id="topic31x"></a>gp\_resgroup\_status 
 
 The `gp_resgroup_status` view allows administrators to see status and activity for a resource group. It shows how many queries are waiting to run and how many queries are currently active in the system for each resource group. The view also displays current memory and CPU usage for the resource group.
 
-> **Note** Resource groups use the Linux control groups \(cgroups\) configured on the host systems. The cgroups are used to manage host system resources. When resource groups use cgroups that are as part of a nested set of cgroups, resource group limits are relative to the parent cgroup allotment. For information about nested cgroups and Greenplum Database resource group limits, see [Using Resource Groups](../admin_guide/workload_mgmt_resgroups.html#topic8339intro).
+> **Note** Resource groups use the Linux control groups \(cgroups\) configured on the host systems. The cgroups are used to manage host system resources. When resource groups use cgroups that are as part of a nested set of cgroups, resource group limits are relative to the parent cgroup allotment. For information about nested cgroups and VMware Greenplum resource group limits, see [Using Resource Groups](../admin_guide/workload_mgmt_resgroups.html#topic8339intro).
 
 This view is accessible to all users.
 
@@ -557,35 +585,21 @@ This view is accessible to all users.
 |groupid|The ID of the resource group.|
 |num\_running|The number of transactions currently running in the resource group.|
 |num\_queueing|The number of currently queued transactions for the resource group.|
-|num\_queued|The total number of queued transactions for the resource group since the Greenplum Database cluster was last started, excluding the num\_queueing.|
-|num\_executed|The total number of transactions run in the resource group since the Greenplum Database cluster was last started, excluding the num\_running.|
-|total\_queue\_duration|The total time any transaction was queued since the Greenplum Database cluster was last started.|
-|cpu\_usage|A set of key-value pairs. For each segment instance \(the key\), the value is the real-time, per-segment instance CPU core usage by a resource group. The value is the sum of the percentages \(as a decimal value\) of CPU cores that are used by the resource group for the segment instance.|
-|memory\_usage|The real-time memory usage of the resource group on each Greenplum Database segment's host.|
+|num\_queued|The total number of queued transactions for the resource group since the VMware Greenplum cluster was last started, excluding the num\_queueing.|
+|num\_executed|The total number of transactions run in the resource group since the VMware Greenplum cluster was last started, excluding the num\_running.|
+|total\_queue\_duration|The total time any transaction was queued since the VMware Greenplum cluster was last started.|
 
-The `cpu_usage` field is a JSON-formatted, key:value string that identifies, for each resource group, the per-segment instance CPU core usage. The key is the segment id. The value is the sum of the percentages \(as a decimal value\) of the CPU cores used by the segment instance's resource group on the segment host; the maximum value is 1.00. The total CPU usage of all segment instances running on a host should not exceed the `gp_resource_group_cpu_limit`. Example `cpu_usage` column output:
+Sample output for the `gp_resgroup_status` view:
 
 ```
-
-{"-1":0.01, "0":0.31, "1":0.31}
+select * from gp_toolkit.gp_resgroup_status;
+ rsgname       | groupid | num_running | num_queueing | num_queued | num_executed | total_queue_duration |
+---------------+---------+-------------+--------------+------------+------------------------------------------------------------------------
+ default_group | 6437    | 0           | 0            | 0          | 0            | @ 0                  |
+ admin_group   | 6438    | 1           | 0            | 0          | 13           | @ 0                  |
+ system_group  | 6441    | 0           | 0            | 0          | 0            | @ 0                  |
+(3 rows)
 ```
-
-In the example, segment `0` and segment `1` are running on the same host; their CPU usage is the same.
-
-The `memory_usage` field is also a JSON-formatted, key:value string. The string contents differ depending upon the type of resource group. For each resource group that you assign to a role \(default memory auditor `vmtracker`\), this string identifies the used and available fixed and shared memory quota allocations on each segment. The key is segment id. The values are memory values displayed in MB units. The following example shows `memory_usage` column output for a single segment for a resource group that you assign to a role:
-
-```
-
-"0":{"used":0, "available":76, "quota_used":-1, "quota_available":60, "shared_used":0, "shared_available":16}
-```
-
-For each resource group that you assign to an external component, the `memory_usage` JSON-formatted string identifies the memory used and the memory limit on each segment. The following example shows `memory_usage` column output for an external component resource group for a single segment:
-
-```
-"1":{"used":11, "limit_granted":15}
-```
-
-> **Note** See the `gp_resgroup_status_per_host` view, described below, for more user-friendly display of CPU and memory usage.
 
 ### <a id="perhost"></a>gp\_resgroup\_status\_per\_host 
 
@@ -596,22 +610,19 @@ The [gp\_resgroup\_status\_per\_host](system_catalogs/catalog_ref-views.html#gp_
 |`rsgname`|The name of the resource group.|
 |`groupid`|The ID of the resource group.|
 |`hostname`|The hostname of the segment host.|
-|`cpu`|The real-time CPU core usage by the resource group on a host. The value is the sum of the percentages \(as a decimal value\) of the CPU cores that are used by the resource group on the host.|
-|`memory_used`|The real-time memory usage of the resource group on the host. This total includes resource group fixed and shared memory. It also includes global shared memory used by the resource group.|
-|`memory_available`|The unused fixed and shared memory for the resource group that is available on the host. This total does not include available resource group global shared memory.|
-|`memory_quota_used`|The real-time fixed memory usage for the resource group on the host.|
-|`memory_quota_available`|The fixed memory available to the resource group on the host.|
-|`memory_shared_used`|The group shared memory used by the resource group on the host. If any global shared memory is used by the resource group, this amount is included in the total as well.|
-|`memory_shared_available`|The amount of group shared memory available to the resource group on the host. Resource group global shared memory is not included in this total.|
+|`cpu_usage`|The real-time CPU core usage by the resource group on a host. The value is the sum of the percentages (as a float value) of the CPU cores that are used by the resource group on the host.|
+|`memory_usage`|The real-time memory usage of the resource group on each database segment's host, in MB.|
 
 Sample output for the `gp_resgroup_status_per_host` view:
 
 ```
- rsgname       | groupid | hostname   | cpu  | memory_used | memory_available | memory_quota_used | memory_quota_available | memory_shared_used | memory_shared_available 
----------------+---------+------------+------+-------------+------------------+-------------------+------------------------+---------------------+---------------------
- admin_group   | 6438    | my-desktop | 0.84 | 1           | 271              | 68                | 68                     | 0                  | 136                     
- default_group | 6437    | my-desktop | 0.00 | 0           | 816              | 0                 | 400                    | 0                  | 416                     
-(2 rows)
+select * from gp_toolkit.gp_resgroup_status_per_host;
+ rsgname       | groupid | hostname | cpu_usage | memory_usage
+---------------+---------+----------+-----------+--------------
+ admin_group   | 6438    | zero     | 0.07      | 91.92
+ default_group | 6437    | zero     | 0.00      | 0.00
+ system_group  | 6441    | zero     | 0.02      | 53.04
+(3 rows)
 ```
 
 ## <a id="topic26"></a>Checking Resource Queue Activity and Status 
@@ -655,7 +666,7 @@ For the resource queues that have active workload, this view shows a summary of 
 
 ### <a id="topic29"></a>gp\_resq\_priority\_statement 
 
-This view shows the resource queue priority, session ID, and other information for all statements currently running in the Greenplum Database system. This view is accessible to all users.
+This view shows the resource queue priority, session ID, and other information for all statements currently running in the VMware Greenplum system. This view is accessible to all users.
 
 |Column|Description|
 |------|-----------|
@@ -695,7 +706,7 @@ This view allows administrators to see status and activity for a resource queue.
 
 ## <a id="topic32"></a>Checking Query Disk Spill Space Usage 
 
-The *gp\_workfile\_\** views show information about all the queries that are currently using disk spill space. Greenplum Database creates work files on disk if it does not have sufficient memory to run the query in memory. This information can be used for troubleshooting and tuning queries. The information in the views can also be used to specify the values for the Greenplum Database configuration parameters `gp_workfile_limit_per_query` and `gp_workfile_limit_per_segment`.
+The *gp\_workfile\_\** views show information about all the queries that are currently using disk spill space. VMware Greenplum creates work files on disk if it does not have sufficient memory to run the query in memory. This information can be used for troubleshooting and tuning queries. The information in the views can also be used to specify the values for the VMware Greenplum configuration parameters `gp_workfile_limit_per_query` and `gp_workfile_limit_per_segment`.
 
 -   [gp\_workfile\_entries](#topic33)
 -   [gp\_workfile\_usage\_per\_query](#topic34)
@@ -709,7 +720,7 @@ This view contains one row for each operator using disk space for workfiles on a
 
 |Column|Type|References|Description|
 |------|----|----------|-----------|
-|`datname`|name| |Greenplum database name.|
+|`datname`|name| |Database name.|
 |`pid`|integer| |Process ID of the server process.|
 |`sess_id`|integer| |Session ID.|
 |`command_cnt`|integer| |Command ID of the query.|
@@ -728,7 +739,7 @@ This view contains one row for each query using disk space for workfiles on a se
 
 |Column|Type|References|Description|
 |------|----|----------|-----------|
-|`datname`|name| |Greenplum database name.|
+|`datname`|name| |Database name.|
 |`pid`|integer| |Process ID of the server process.|
 |`sess_id`|integer| |Session ID.|
 |`command_cnt`|integer| |Command ID of the query.|
@@ -750,7 +761,7 @@ This view contains one row for each segment. Each row displays the total amount 
 
 ## <a id="topic36"></a>Viewing Users and Groups \(Roles\) 
 
-It is frequently convenient to group users \(roles\) together to ease management of object privileges: that way, privileges can be granted to, or revoked from, a group as a whole. In Greenplum Database this is done by creating a role that represents the group, and then granting membership in the group role to individual user roles.
+It is frequently convenient to group users \(roles\) together to ease management of object privileges: that way, privileges can be granted to, or revoked from, a group as a whole. In VMware Greenplum, this is done by creating a role that represents the group, and then granting membership in the group role to individual user roles.
 
 The [gp\_roles\_assigned](#topic37) view can be used to see all of the roles in the system, and their assigned members \(if the role is also a group role\).
 
@@ -769,12 +780,11 @@ This view shows all of the roles in the system, and their assigned members \(if 
 
 ## <a id="topic38"></a>Checking Database Object Sizes and Disk Space 
 
-The `gp_size_*` family of views can be used to determine the disk space usage for a distributed Greenplum Database, schema, table, or index. The following views calculate the total size of an object across all primary segments \(mirrors are not included in the size calculations\).
+The `gp_size_*` family of views can be used to determine the disk space usage for a distributed VMware Greenplum database, schema, table, or index. The following views calculate the total size of an object across all primary segments \(mirrors are not included in the size calculations\).
 
 -   [gp\_size\_of\_all\_table\_indexes](#topic39)
 -   [gp\_size\_of\_database](#topic40)
 -   [gp\_size\_of\_index](#topic41)
--   [gp\_size\_of\_partition\_and\_indexes\_disk](#topic42)
 -   [gp\_size\_of\_schema\_disk](#topic43)
 -   [gp\_size\_of\_table\_and\_indexes\_disk](#topic44)
 -   [gp\_size\_of\_table\_and\_indexes\_licensing](#topic45)
@@ -826,21 +836,6 @@ This view shows the total size of an index. This view is accessible to all users
 |soiindexname|The name of the index|
 |soitableschemaname|The name of the table schema|
 |soitablename|The name of the table|
-
-### <a id="topic42"></a>gp\_size\_of\_partition\_and\_indexes\_disk 
-
-This view shows the size on disk of partitioned child tables and their indexes. This view is accessible to all users, however non-superusers will only be able to see relations that they have permission to access.
-
-|Column|Description|
-|------|-----------|
-|sopaidparentoid|The object ID of the parent table|
-|sopaidpartitionoid|The object ID of the partition table|
-|sopaidpartitiontablesize|The partition table size in bytes|
-|sopaidpartitionindexessize|The total size of all indexes on this partition|
-|Sopaidparentschemaname|The name of the parent schema|
-|Sopaidparenttablename|The name of the parent table|
-|Sopaidpartitionschemaname|The name of the partition schema|
-|sopaidpartitiontablename|The name of the partition table|
 
 ### <a id="topic43"></a>gp\_size\_of\_schema\_disk 
 
@@ -912,9 +907,101 @@ This external table runs the `df` \(disk free\) command on the active segment ho
 |dfdevice|The device name|
 |dfspace|Free disk space in the segment file system in kilobytes|
 
+## <a id="missingfiles"></a>Checking for Missing and Orphaned Data Files
+
+VMware Greenplum considers a relation data file that is present in the catalog, but not on disk, to be missing. Conversely, when Greenplum encounters an unexpected data file on disk that is not referenced in any relation, it considers that file to be orphaned.
+
+VMware Greenplum provides the following views to help identify if missing or orphaned files exist in the current database:
+
+- [gp_check_orphaned_files](#mf_orphaned)
+- [gp_check_missing_files](#mf_missing)
+- [gp_check_missing_files_ext](#mf_missing_ext)
+
+Consider it a best practice to check for these conditions prior to expanding the cluster or before offline maintenance.
+
+By default, the views identified in this section are available to `PUBLIC`.
+
+### <a id="mf_orphaned"></a>gp_check_orphaned_files
+
+The `gp_check_orphaned_files` view scans the default and user-defined tablespaces for orphaned data files. VMware Greenplum considers normal data files, files with an underscore (`_`) in the name, and extended numbered files (files that contain a `.<N>` in the name) in this check. `gp_check_orphaned_files` gathers results from the VMware Greenplum coordinator and all segments.
+
+|Column|Description|
+|------|-----------|
+| gp_segment_id | The database segment identifier. |
+| tablespace | The identifier of the tablespace in which the orphaned file resides. |
+| filename | The file name of the orphaned data file. |
+| filepath | The file system path of the orphaned data file, relative to the data directory of the coordinator or segment. |
+
+> **Caution** Use this view as one of many data points to identify orphaned data files. Do not delete files based solely on results from querying this view.
+
+### <a id="mf_missing"></a>gp_check_missing_files
+
+The `gp_check_missing_files` view scans heap and append-optimized, column-oriented tables for missing data files. Greenplum considers only normal data files (files that do not contain a `.` or an `_` in the name) in this check. `gp_check_missing_files` gathers results from the VMware Greenplum coordinator and all segments.
+
+|Column|Description|
+|------|-----------|
+| gp_segment_id | The database segment identifier. |
+| tablespace | The identifier of the tablespace in which the table resides. |
+| relname | The name of the table that has a missing data file(s). |
+| filename | The file name of the missing data file. |
+
+
+### <a id="mf_missing_ext"></a>gp_check_missing_files_ext
+
+The `gp_check_missing_files_ext` view scans only append-optimized, column-oriented tables for missing extended data files. VMware Greenplum considers both normal data files and extended numbered files (files that contain a `.<N>` in the name) in this check. Files that contain an `_` in the name are not considered. `gp_check_missing_files_ext` gathers results from the VMware Greenplum database segments only.
+
+|Column|Description|
+|------|-----------|
+| gp_segment_id | The database segment identifier. |
+| tablespace | The identifier of the tablespace in which the table resides. |
+| relname | The name of the table that has a missing extended data file(s). |
+| filename | The file name of the missing extended data file. |
+
+## <a id="moveorphanfiles"></a>Moving Orphaned Data Files
+
+The `gp_move_orphaned_files()` user-defined function (UDF) moves orphaned files found by the [gp_check_orphaned_files](#mf_orphaned) view into a file system location that you specify.
+
+The function signature is: `gp_move_orphaned_files( <target_directory> TEXT )`.
+
+`<target_directory>` must exist on all segment hosts before you move the files, and the specified directory must be accessible by the `gpadmin` user. If you specify a relative path for `<target_directory>`, it is considered relative to the data directory of the coordinator or segment.
+
+VMware Greenplum renames each moved data file to one that reflects the original location of the file in the data directory. The file name format differs depending on the tablespace in which the orphaned file resides:
+
+| Tablespace | Renamed File Format|
+|------|-----------|
+| default | `seg<num>_base_<database-oid>_<relfilenode>` |
+| global | `seg<num>_global_<relfilenode>` |
+| user-defined | `seg<num>_pg_tblspc_<tablespace-oid>_<gpdb-version>_<database-oid>_<relfilenode>` |
+
+For example, if a file named `12345` in the default tablespace is orphaned on primary segment 2,
+
+```
+SELECT * FROM gp_move_orphaned_files('/home/gpadmin/orphaned');
+```
+
+moves and renames the file as follows:
+
+| Original Location | New Location and File Name |
+|------|-----------|
+| `<data_directory>/base/13700/12345` | `/home/gpadmin/orphaned/seg2_base_13700_12345` |
+
+`gp_move_orphaned_files()` returns both the original and the new file system locations for each file that it moves, and also provides an indication of the success or failure of the move operation. For example:
+
+```
+SELECT * FROM gp_toolkit.gp_move_orphaned_files('/home/gpadmin/orphaned');
+ gp_segment_id | move_success |           oldpath          |         newpath
+---------------+--------------+----------------------------+-----------------------------------
+            -1 | t            | /<data_dir>/base/13715/99999 | /home/gpadmin/orphaned/seg-1_base_13715_99999
+             1 | t            | /<data_dir>/base/13715/99999 | /home/gpadmin/orphaned/seg1_base_13715_99999
+             2 | t            | /<data_dir>/base/13715/99999 | /home/gpadmin/orphaned/seg2_base_13715_99999
+(3 rows)
+```
+
+Once you move the files, you may choose to remove them or to back them up.
+
 ## <a id="topic49"></a>Checking for Uneven Data Distribution 
 
-All tables in Greenplum Database are distributed, meaning their data is divided across all of the segments in the system. If the data is not distributed evenly, then query processing performance may decrease. The following views can help diagnose if a table has uneven data distribution:
+All tables in VMware Greenplum are distributed, meaning their data is divided across all of the segments in the system. If the data is not distributed evenly, then query processing performance may decrease. The following views can help diagnose if a table has uneven data distribution:
 
 -   [gp\_skew\_coefficients](#topic50)
 -   [gp\_skew\_idle\_fractions](#topic51)
@@ -943,3 +1030,44 @@ This view shows data distribution skew by calculating the percentage of the syst
 |sifrelname|The table name.|
 |siffraction|The percentage of the system that is idle during a table scan, which is an indicator of uneven data distribution or query processing skew. For example, a value of 0.1 indicates 10% skew, a value of 0.5 indicates 50% skew, and so on. Tables that have more than 10% skew should have their distribution policies evaluated.|
 
+## <a id="maintaining_partitions"></a>Maintaining Partitions
+
+If your database employs partitions you will need to perform certain tasks regularly to help maintain those partitions. VMware Greenplum includes a view and a number of user-defined functions to help with these tasks. 
+
+### The gp_partitions View
+
+The `gp_partitions` view shows all leaf partitions in a database.
+
+This view provides backwards compatibility with the legacy `pg_partitions` view (available in earlier major versions of VMware Greenplum). 
+
+|Column|Type|Description|
+|------|------|---------|
+|schemaname|name|The name of the schema the partitioned table is in.|
+|tablename|name|The name of the top-level parent table.|
+|partitionschemaname|name|The schema of the partition table.|
+|partitiontablename|name|The relation name of the partitioned table (this is the table name to use if accessing the partition directly).|
+|parentpartitiontablename|regclass|The relation name of the parent table one level up from this partition.|
+|partitiontype|text|The type of partition (range or list).|
+|partitionlevel|integer|The level of this partition in the hierarchy.|
+|partitionrank|integer|For range partitions, the rank of the partition compared to other partitions of the same level.|
+|partitionlistvalues|text|For list partitions, the list value(s) associated with this partition.|
+|partitionrangestart|text|For range partitions, the start value of this partition.|
+|partitionrangeend|text|For range partitions, the end value of this partition.|
+|partitionisdefault|boolean|T if this is a default partition, otherwise F.|
+|partitionboundary|text|The entire partition specification for this partition.|
+|parenttablespace|name|The tablespace of the parent table one level up from this partition.|
+|partitiontablespace|name|The tablespace of this partition.|
+
+### User-Defined Functions for Partition Maintenance
+
+The following table summarizes the functions VMware Greenplum provides to help you maintain partitions:
+
+|Function|Return Type|Description|
+|------|----|--------------|
+|`pg_partition_rank(rp regclass)`|integer|For range partitions, returns the rank of the partition compared to other partitions of the same level.For other partition types, it returns `NULL`. |
+|`pg_partition_range_from(rp regclass)`|text|Returns the lower bound of a range partition.|
+|`pg_partition_range_to(rp regclass)`|text|Returns the upper bound of a range partition.|
+|`pg_partition_bound_value(rp regclass)`|text| Returns a textual representation of the bounds of a range partition.|
+|`pg_partition_isdefault(rp regclass)`|boolean|Evaluates whether a given partition is a default partition.|
+`pg_partition_lowest_child(rp regclass)`|regclass|Finds the lowest ranked child of given partition.|
+|`pg_partition_highest_child(rp regclass)`|regclass|Finds the highest ranked child of given partition.|

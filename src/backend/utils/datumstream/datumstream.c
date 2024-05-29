@@ -319,6 +319,7 @@ init_datumstream_typeinfo(
 {
 	typeInfo->datumlen = attr->attlen;
 	typeInfo->typid = attr->atttypid;
+	typeInfo->typstorage = attr->attstorage;
 	typeInfo->align = attr->attalign;
 	typeInfo->byval = attr->attbyval;
 }
@@ -431,7 +432,19 @@ init_datumstream_info(
 				ao_attr->compressType = "zlib";
 				ao_attr->compressLevel = 9;
 				break;
+#ifdef USE_ZSTD
+			case 5:
+				ao_attr->compress = true;
+				ao_attr->compressType = "zstd";
+				ao_attr->compressLevel = 1;
+				break;
 
+			case 6:
+				ao_attr->compress = true;
+				ao_attr->compressType = "zstd";
+				ao_attr->compressLevel = 3; /* zstd recommended default */
+				break;
+#endif
 			default:
 				ereport(ERROR,
 						(errmsg("Unexpected compresslevel %d",
@@ -861,6 +874,12 @@ datumstreamread_close_file(DatumStreamRead * ds)
 {
 	AppendOnlyStorageRead_CloseFile(&ds->ao_read);
 
+	/*
+	 * Reset blockRowCount as file being closed,
+	 * which also helps to direct to next segfile
+	 * reading in sampling scenario.
+	 */
+	ds->blockRowCount = 0;
 	ds->need_close_file = false;
 }
 
@@ -962,8 +981,7 @@ datumstreamwrite_block_dense(DatumStreamWrite * acc)
 int64
 datumstreamwrite_block(DatumStreamWrite *acc,
 					   AppendOnlyBlockDirectory *blockDirectory,
-					   int columnGroupNo,
-					   bool addColAction)
+					   int columnGroupNo)
 {
 	int64 writesz;
 	int itemCount = DatumStreamBlockWrite_Nth(&acc->blockWrite);
@@ -998,8 +1016,7 @@ datumstreamwrite_block(DatumStreamWrite *acc,
 		columnGroupNo,
 		acc->blockFirstRowNum,
 		AppendOnlyStorageWrite_LogicalBlockStartOffset(&acc->ao_write),
-		itemCount,
-		addColAction);
+		itemCount);
 
 	return writesz;
 }
@@ -1014,11 +1031,10 @@ datumstreamwrite_print_large_varlena_info(
 }
 
 int64
-datumstreamwrite_lob(DatumStreamWrite * acc,
+datumstreamwrite_lob(DatumStreamWrite *acc,
 					 Datum d,
 					 AppendOnlyBlockDirectory *blockDirectory,
-					 int colGroupNo,
-					 bool addColAction)
+					 int colGroupNo)
 {
 	uint8	   *p;
 	int32		varLen;
@@ -1076,13 +1092,12 @@ datumstreamwrite_lob(DatumStreamWrite * acc,
 		colGroupNo,
 		acc->blockFirstRowNum,
 		AppendOnlyStorageWrite_LogicalBlockStartOffset(&acc->ao_write),
-		1, /*itemCount -- always just the lob just inserted */
-		addColAction);
+		1);
 
 	return varLen;
 }
 
-static bool
+bool
 datumstreamread_block_info(DatumStreamRead * acc)
 {
 	bool		readOK = false;
@@ -1354,8 +1369,7 @@ datumstreamread_block(DatumStreamRead * acc,
 											 colGroupNo,
 											 acc->blockFirstRowNum,
 											 acc->blockFileOffset,
-											 acc->blockRowCount,
-											 false);
+											 acc->blockRowCount);
 	}
 
 	return 0;

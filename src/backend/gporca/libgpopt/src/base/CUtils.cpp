@@ -734,6 +734,7 @@ CUtils::PexprScalarArrayCmp(CMemoryPool *mp,
 		!IMDId::IsValid(pmdidCmpOp))
 	{
 		// cannot construct an ArrayCmp expression if any of these are invalid
+		pexprScalarChildren->Release();
 		return nullptr;
 	}
 
@@ -1159,18 +1160,6 @@ CUtils::FPhysicalJoin(COperator *pop)
 	GPOS_ASSERT(nullptr != pop);
 
 	return FHashJoin(pop) || FNLJoin(pop);
-}
-
-// check if a given operator is a physical left outer join
-BOOL
-CUtils::FPhysicalLeftOuterJoin(COperator *pop)
-{
-	GPOS_ASSERT(nullptr != pop);
-
-	return COperator::EopPhysicalLeftOuterNLJoin == pop->Eopid() ||
-		   COperator::EopPhysicalLeftOuterIndexNLJoin == pop->Eopid() ||
-		   COperator::EopPhysicalLeftOuterHashJoin == pop->Eopid() ||
-		   COperator::EopPhysicalCorrelatedLeftOuterNLJoin == pop->Eopid();
 }
 
 // check if a given operator is a physical agg
@@ -2188,14 +2177,15 @@ CUtils::PexprLogicalSelect(CMemoryPool *mp, CExpression *pexpr,
 	GPOS_ASSERT(nullptr != pexprPredicate);
 
 	CTableDescriptor *ptabdesc = nullptr;
-	if (pexpr->Pop()->Eopid() == CLogical::EopLogicalSelect ||
-		pexpr->Pop()->Eopid() == CLogical::EopLogicalGet ||
+	if (pexpr->Pop()->Eopid() == CLogical::EopLogicalGet ||
 		pexpr->Pop()->Eopid() == CLogical::EopLogicalDynamicGet)
 	{
-		ptabdesc = pexpr->DeriveTableDescriptor();
-		// there are some cases where we don't populate LogicalSelect currently
-		GPOS_ASSERT_IMP(pexpr->Pop()->Eopid() != CLogical::EopLogicalSelect,
-						nullptr != ptabdesc);
+		ptabdesc = pexpr->DeriveTableDescriptor()->First();
+		GPOS_ASSERT(nullptr != ptabdesc);
+	}
+	else if (pexpr->Pop()->Eopid() == CLogical::EopLogicalSelect)
+	{
+		ptabdesc = CLogicalSelect::PopConvert(pexpr->Pop())->Ptabdesc();
 	}
 	return GPOS_NEW(mp) CExpression(
 		mp, GPOS_NEW(mp) CLogicalSelect(mp, ptabdesc), pexpr, pexprPredicate);
@@ -2538,6 +2528,37 @@ CUtils::FScalarConstOrBinaryCoercible(CExpression *pexpr)
 	return CUtils::FScalarConst(pexpr) ||
 		   CCastUtils::FBinaryCoercibleCastedConst(pexpr);
 }
+
+// checks to see if expression is a NullTest check on a column (ex: col IS NULL)
+BOOL
+CUtils::FScalarIdentNullTest(CExpression *pexpr)
+{
+	GPOS_ASSERT(nullptr != pexpr);
+	return (CUtils::FScalarNullTest(pexpr) &&
+			CUtils::FScalarIdent((*pexpr)[0]));
+}
+
+// checks to see if expression contains a NullTest check on a column (ex: col IS NULL)
+BOOL
+CUtils::FContainsScalarIdentNullTest(CExpression *pexpr)
+{
+	GPOS_ASSERT(nullptr != pexpr);
+
+	if (CUtils::FScalarIdentNullTest(pexpr))
+	{
+		return true;
+	}
+	for (ULONG i = 0; i < pexpr->Arity(); i++)
+	{
+		if (FContainsScalarIdentNullTest((*pexpr)[i]))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 // checks to see if the expression is a scalar const TRUE
 BOOL
 CUtils::FScalarConstTrue(CExpression *pexpr)
@@ -4467,6 +4488,25 @@ CUtils::PexprLimit(CMemoryPool *mp, CExpression *pexpr, ULONG ulOffSet,
 		CExpression(mp, popLimit, pexpr, pexprLimitOffset, pexprLimitCount);
 }
 
+// generate a limit expression on top of the given relational child with given offset, limit count and OrderSpec
+CExpression *
+CUtils::BuildLimitExprWithOrderSpec(CMemoryPool *mp, CExpression *pexpr,
+									COrderSpec *pos, ULONG ulOffSet,
+									ULONG count)
+{
+	GPOS_ASSERT(pexpr);
+	GPOS_ASSERT(nullptr != pos);
+
+	CLogicalLimit *popLimit = GPOS_NEW(mp)
+		CLogicalLimit(mp, pos, true /* fGlobal */, true /* fHasCount */,
+					  false /*fTopLimitUnderDML*/);
+	CExpression *pexprLimitOffset = CUtils::PexprScalarConstInt8(mp, ulOffSet);
+	CExpression *pexprLimitCount = CUtils::PexprScalarConstInt8(mp, count);
+
+	return GPOS_NEW(mp)
+		CExpression(mp, popLimit, pexpr, pexprLimitOffset, pexprLimitCount);
+}
+
 // check if a given operator is a ANY subquery
 BOOL
 CUtils::FAnySubquery(COperator *pop)
@@ -5003,5 +5043,59 @@ CUtils::AddExprs(CExpressionArrays *results_exprs,
 		results_exprs->Append(exprs);
 	}
 	GPOS_ASSERT(results_exprs->Size() >= input_exprs->Size());
+}
+
+
+// Given a table desriptor set, return a new table descriptor set without
+// duplicate mdids. This can happen if there is more than one table desriptor
+// for the same table, but using different alias names.
+CTableDescriptorHashSet *
+CUtils::RemoveDuplicateMdids(CMemoryPool *mp, CTableDescriptorHashSet *tabdescs)
+{
+	GPOS_ASSERT(nullptr != tabdescs);
+	CTableDescriptorHashSet *result = GPOS_NEW(mp) CTableDescriptorHashSet(mp);
+
+	MdidHashSet *mdids = GPOS_NEW(mp) MdidHashSet(mp);
+	CTableDescriptorHashSetIter hsiter(tabdescs);
+	while (hsiter.Advance())
+	{
+		CTableDescriptor *tabdesc =
+			const_cast<CTableDescriptor *>(hsiter.Get());
+		if (mdids->Insert(tabdesc->MDId()))
+		{
+			tabdesc->MDId()->AddRef();
+			if (result->Insert(tabdesc))
+			{
+				tabdesc->AddRef();
+			}
+		}
+	}
+	mdids->Release();
+	return result;
+}
+
+// Replace column reference with projection expr recursively
+CExpression *
+CUtils::ReplaceColrefWithProjectExpr(CMemoryPool *mp, CExpression *pexpr,
+									 CColRef *pcolref, CExpression *pprojExpr)
+{
+	// replace reference
+	if (pexpr->Pop()->Eopid() == COperator::EopScalarIdent &&
+		CColRef::Equals(CScalarIdent::PopConvert(pexpr->Pop())->Pcr(), pcolref))
+	{
+		pprojExpr->AddRef();
+		return pprojExpr;
+	}
+
+	// recurse to children
+	CExpressionArray *pdrgpexprChildren = GPOS_NEW(mp) CExpressionArray(mp);
+	for (ULONG ul = 0; ul < pexpr->Arity(); ul++)
+	{
+		pdrgpexprChildren->Append(
+			ReplaceColrefWithProjectExpr(mp, (*pexpr)[ul], pcolref, pprojExpr));
+	}
+	COperator *pop = pexpr->Pop();
+	pop->AddRef();
+	return GPOS_NEW(mp) CExpression(mp, pop, pdrgpexprChildren);
 }
 // EOF

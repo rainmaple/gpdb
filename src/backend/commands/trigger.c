@@ -1180,7 +1180,7 @@ CreateTriggerFiringOn(CreateTrigStmt *stmt, const char *queryString,
 	 */
 	if (partition_recurse)
 	{
-		PartitionDesc partdesc = RelationGetPartitionDesc(rel);
+		PartitionDesc partdesc = RelationRetrievePartitionDesc(rel);
 		List	   *idxs = NIL;
 		List	   *childTbls = NIL;
 		ListCell   *l;
@@ -1960,7 +1960,7 @@ EnableDisableTriggerNew(Relation rel, const char *tgname,
 			rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE &&
 			(TRIGGER_FOR_ROW(oldtrig->tgtype)))
 		{
-			PartitionDesc partdesc = RelationGetPartitionDesc(rel);
+			PartitionDesc partdesc = RelationRetrievePartitionDesc(rel);
 			int			i;
 
 			for (i = 0; i < partdesc->nparts; i++)
@@ -2710,9 +2710,6 @@ ExecARInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 	if ((trigdesc && trigdesc->trig_insert_after_row) ||
 		(transition_capture && transition_capture->tcs_insert_new_table))
 	{
-		if(RelationIsAoCols(relinfo->ri_RelationDesc))
-			elog(ERROR, "Trigger is not supported on AOCS yet");
-
 		AfterTriggerSaveEvent(estate, relinfo, TRIGGER_EVENT_INSERT,
 							  true, NULL, slot,
 							  recheckIndexes, NULL,

@@ -104,6 +104,9 @@
 #define PRETTY_INDENT(context)	((context)->prettyFlags & PRETTYFLAG_INDENT)
 #define PRETTY_SCHEMA(context)	((context)->prettyFlags & PRETTYFLAG_SCHEMA)
 
+/* macros for negative operator only used in current file */
+#define	Int4NegOperator			558
+#define	NumericNegOperator		1751
 
 /* ----------
  * Local data types
@@ -4753,6 +4756,8 @@ set_deparse_planstate(deparse_namespace *dpns, PlanState *ps)
 		dpns->index_tlist = ((ForeignScan *) ps->plan)->fdw_scan_tlist;
 	else if (IsA(ps->plan, CustomScan))
 		dpns->index_tlist = ((CustomScan *) ps->plan)->custom_scan_tlist;
+	else if (IsA(ps->plan, DynamicIndexOnlyScan))
+		dpns->index_tlist = ((DynamicIndexOnlyScan *) ps->plan)->indexscan.indextlist;
 	else
 		dpns->index_tlist = NIL;
 }
@@ -6010,6 +6015,35 @@ get_rule_sortgroupclause(Index ref, List *tlist, bool force_colno,
 		get_const_expr((Const *) expr, context, 1);
 	else if (!expr || IsA(expr, Var))
 		get_rule_expr(expr, context, true);
+	else if (expr && IsA(expr, OpExpr))
+	{
+		OpExpr		*opexpr = (OpExpr *)expr;
+		List		*args = opexpr->args;
+		bool		need_paren = PRETTY_PAREN(context);
+
+		/*
+		 * Const-folder the expression(opexpr plus const) to negative const,
+		 * mainly there are two operators we need to worried about, namely
+		 * in4um(Int4NegOperator) and numeric_uminus(NumericNegOperator),
+		 * and get_const_expr() is responsible for end up getting labeled
+		 * with a typecast.
+		 */
+		if (list_length(args) == 1)
+		{
+			Node	   *arg = (Node *) linitial(args);
+			Oid			opno = opexpr->opno;
+
+			if ((opno == Int4NegOperator || opno == NumericNegOperator) &&
+				 IsA(arg, Const))
+				expr = (Node *) expression_planner((Expr *)expr);
+		}
+
+		if (need_paren)
+			appendStringInfoChar(context->buf, '(');
+		get_rule_expr(expr, context, true);
+		if (need_paren)
+			appendStringInfoChar(context->buf, ')');
+	}
 	else
 	{
 		/*
@@ -8276,7 +8310,12 @@ get_rule_expr(Node *node, deparse_context *context,
 				AlternativeSubPlan *asplan = (AlternativeSubPlan *) node;
 				ListCell   *lc;
 
-				/* As above, this can only happen during EXPLAIN */
+				/*
+				 * This case cannot be reached in normal usage, since no
+				 * AlternativeSubPlan can appear either in parsetrees or
+				 * finished plan trees.  We keep it just in case somebody
+				 * wants to use this code to print planner data structures.
+				 */
 				appendStringInfoString(buf, "(alternatives: ");
 				foreach(lc, asplan->subplans)
 				{
@@ -9229,9 +9268,9 @@ get_rule_expr(Node *node, deparse_context *context,
 					if (elem->partName)
 					{
 						if (elem->isDefault)
-							appendStringInfo(buf, "DEFAULT SUBPARTITION %s", elem->partName);
+							appendStringInfo(buf, "DEFAULT SUBPARTITION %s", quote_identifier(elem->partName));
 						else
-							appendStringInfo(buf, "SUBPARTITION %s", elem->partName);
+							appendStringInfo(buf, "SUBPARTITION %s", quote_identifier(elem->partName));
 					}
 
 					if (elem->boundSpec)
@@ -9308,16 +9347,15 @@ get_rule_expr(Node *node, deparse_context *context,
 					{
 						ListCell *cell;
 
-						appendStringInfoString(buf, sep);
 						appendStringInfoString(buf, " WITH (");
 						if (elem->accessMethod)
 						{
-							if (pg_strcasecmp(elem->accessMethod, "ao_row") != 0)
+							if (pg_strcasecmp(elem->accessMethod, "ao_row") == 0)
 							{
 								appendStringInfoString(buf, "appendonly=true, orientation=row");
 								sep = ", ";
 							}
-							else if (pg_strcasecmp(elem->accessMethod, "ao_column") != 0)
+							else if (pg_strcasecmp(elem->accessMethod, "ao_column") == 0)
 							{
 								appendStringInfoString(buf, "appendonly=true, orientation=column");
 								sep = ", ";

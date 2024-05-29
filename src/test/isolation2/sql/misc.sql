@@ -4,6 +4,11 @@
 -- NOTICE: we must connect to coordinator in utility mode because the oid of table is
 -- preassigned in QD, if we create a table in utility mode in QE, the oid might
 -- conflict with preassigned oid.
+--
+-- start_matchsubs
+-- m/\(cost=.*\)/
+-- s/\(cost=.*\)//
+-- end_matchsubs
 -1U: create table utilitymode_primary_key_tab (c1 int);
 -1U: create unique index idx_utilitymode_c1 on utilitymode_primary_key_tab (c1);
 -1U: drop table utilitymode_primary_key_tab;
@@ -53,3 +58,16 @@ create or replace view misc_v as select 1;
 0U: select count(*) > 0 from gp_dist_random('misc_v2');
 0U: drop view misc_v2;
 drop view misc_v;
+
+--
+-- gp_toolkit.gp_check_orphaned_files should not be running with concurrent transaction (even idle)
+--
+-- use a different database to do the test, otherwise we might be reporting tons 
+-- of orphaned files produced by the many intential PANICs/restarts in the isolation2 tests.
+create database check_orphaned_db;
+1:@db_name check_orphaned_db: begin;
+2:@db_name check_orphaned_db: select * from gp_toolkit.gp_check_orphaned_files;
+1q:
+2q:
+
+drop database check_orphaned_db;

@@ -11,7 +11,8 @@
 -- Scenario: User table without hll flag
 --------------------------------------------------------------------------------
 
-create table minirepro_foo(a int) partition by range(a);
+create sequence minirepro_foo_b_seq cache 1;
+create table minirepro_foo(a int, b int default nextval('minirepro_foo_b_seq'::regclass), c serial) partition by range(a);
 create table minirepro_foo_1 partition of minirepro_foo for values from (1) to (5);
 insert into minirepro_foo values(1);
 analyze minirepro_foo;
@@ -25,9 +26,10 @@ analyze minirepro_foo;
 
 -- Run minirepro
 drop table minirepro_foo; -- this will also delete the pg_statistic tuples for minirepro_foo and minirepro_foo_1
+drop sequence minirepro_foo_b_seq;
 
 -- start_ignore
-\! psql -f data/minirepro.sql regression
+\! psql -Xf data/minirepro.sql regression
 -- end_ignore
 
 select
@@ -65,6 +67,7 @@ from pg_statistic where starelid IN ('minirepro_foo'::regclass, 'minirepro_foo_1
 
 -- Cleanup
 drop table minirepro_foo;
+drop sequence minirepro_foo_b_seq;
 
 --------------------------------------------------------------------------------
 -- Scenario: User table with hll flag
@@ -86,7 +89,7 @@ analyze minirepro_foo;
 drop table minirepro_foo; -- this will also delete the pg_statistic tuples for minirepro_foo and minirepro_foo_1
 
 -- start_ignore
-\! psql -f data/minirepro.sql regression
+\! psql -Xf data/minirepro.sql regression
 -- end_ignore
 
 select
@@ -148,7 +151,7 @@ update pg_statistic set stavalues3='{"hello", "''world''"}'::text[] where starel
 drop table minirepro_foo; -- this should also delete the pg_statistic tuple for minirepro_foo
 
 -- start_ignore
-\! psql -f data/minirepro.sql regression
+\! psql -Xf data/minirepro.sql regression
 -- end_ignore
 
 select stavalues3 from pg_statistic where starelid='minirepro_foo'::regclass;
@@ -157,59 +160,9 @@ select stavalues3 from pg_statistic where starelid='minirepro_foo'::regclass;
 drop table minirepro_foo;
 
 --------------------------------------------------------------------------------
--- Scenario: Catalog table without hll flag
+-- Ensure that our expectation of pg_statistic_ext and pg_statistic_ext_data schema is up-to-date
 --------------------------------------------------------------------------------
 
--- Generate minirepro
-
--- start_ignore
-\! echo "select oid from pg_tablespace;" > data/minirepro_q.sql
-\! minirepro regression -q data/minirepro_q.sql -f data/minirepro.sql
--- end_ignore
-
--- Run minirepro
--- Caution: The following operation will remove the pg_statistic tuple
--- corresponding to pg_tablespace before it re-inserts it, which may lead to
--- corrupted stats for pg_tablespace. But, that shouldn't matter too much?
-
--- start_ignore
-\! psql -f data/minirepro.sql regression
--- end_ignore
-
-select
-    staattnum,
-    stainherit,
-    stanullfrac,
-    stawidth,
-    stadistinct,
-    stakind1,
-    stakind2,
-    stakind3,
-    stakind4,
-    stakind5,
-    staop1,
-    staop2,
-    staop3,
-    staop4,
-    staop5,
-    stacoll1,
-    stacoll2,
-    stacoll3,
-    stacoll4,
-    stacoll5,
-    stanumbers1,
-    stanumbers2,
-    stanumbers3,
-    stanumbers4,
-    stanumbers5,
-    stavalues1,
-    stavalues2,
-    stavalues3,
-    stavalues4,
-    stavalues5
-from pg_statistic where starelid='pg_tablespace'::regclass;
-
--- Ensure that our expectation of pg_statistic_ext and pg_statistic_ext_data schema is up-to-date
 \d+ pg_statistic_ext
 \d+ pg_statistic_ext_data
 
@@ -237,7 +190,7 @@ analyze minirepro_foo;
 drop table minirepro_foo; -- this will also delete the tuples from pg_statistic_ext and pg_statistic_ext_data
 
 -- start_ignore
-\! psql -f data/minirepro.sql regression
+\! psql -Xf data/minirepro.sql regression
 -- end_ignore
 
 -- Verify that correlated stats are updated
@@ -281,7 +234,7 @@ drop table minirepro_foo;
 drop table minirepro_bar;
 
 -- start_ignore
-\! psql -f data/minirepro.sql regression
+\! psql -Xf data/minirepro.sql regression
 -- end_ignore
 
 -- Verify that correlated stats are updated
@@ -293,3 +246,40 @@ select stxname, stxdndistinct, stxddependencies, stxdmcv from pg_statistic_ext p
 -- Cleanup
 drop table minirepro_foo;
 drop table minirepro_bar;
+
+--------------------------------------------------------------------------------
+-- Scenario: Test if minirepro captures non-default optimization settings
+--------------------------------------------------------------------------------
+create table minirepro_foo(a int, b int);
+alter database regression set enable_indexscan to off;
+alter database regression set optimizer_join_order to greedy;
+
+-- start_ignore
+\! echo "select * from minirepro_foo" > ./data/minirepro_q.sql
+\! minirepro regression -q data/minirepro_q.sql -f data/minirepro.sql
+-- end_ignore
+
+-- Validate if above set gucs are captured in Non-default gucs section
+\! grep -E 'Non-default optimization guc settings|enable_indexscan|optimizer_join_order' data/minirepro.sql
+
+alter database regression reset enable_indexscan;
+alter database regression reset optimizer_join_order;
+-- Cleanup
+drop table minirepro_foo;
+
+--------------------------------------------------------------------------------
+-- Scenario: Test if minirepro reports appropriate message if no default
+--           planner settings are altered
+--------------------------------------------------------------------------------
+create table minirepro_foo(a int, b int);
+
+-- start_ignore
+\! echo "select * from minirepro_foo" > ./data/minirepro_q.sql
+\! minirepro regression -q data/minirepro_q.sql -f data/minirepro.sql
+-- end_ignore
+
+-- Validate if appropriate message is reported in Non-default gucs section
+\! grep -E 'Non-default optimization guc settings|Using all default guc settings' data/minirepro.sql
+
+-- Cleanup
+drop table minirepro_foo;

@@ -94,11 +94,13 @@ static void StatementTimeoutHandler(void);
 static void LockTimeoutHandler(void);
 static void IdleInTransactionSessionTimeoutHandler(void);
 static void IdleGangTimeoutHandler(void);
+static void GpParallelRetrieveCursorCheckTimeoutHandler(void);
 static void ClientCheckTimeoutHandler(void);
 static bool ThereIsAtLeastOneRole(void);
 static void process_startup_options(Port *port, bool am_superuser);
 static void process_settings(Oid databaseid, Oid roleid);
 
+extern bool DoingCommandRead;
 #ifdef USE_ORCA
 extern void InitGPOPT();
 extern void TerminateGPOPT();
@@ -682,14 +684,17 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	GPMemoryProtect_Init();
 
 #ifdef USE_ORCA
-	/* Initialize GPOPT */
-	OptimizerMemoryContext = AllocSetContextCreate(TopMemoryContext,
-												   "GPORCA Top-level Memory Context",
-												   ALLOCSET_DEFAULT_MINSIZE,
-												   ALLOCSET_DEFAULT_INITSIZE,
-												   ALLOCSET_DEFAULT_MAXSIZE);
+	if (Gp_role == GP_ROLE_DISPATCH)
+	{
+		/* Initialize GPOPT */
+		OptimizerMemoryContext = AllocSetContextCreate(TopMemoryContext,
+													"GPORCA Top-level Memory Context",
+													ALLOCSET_DEFAULT_MINSIZE,
+													ALLOCSET_DEFAULT_INITSIZE,
+													ALLOCSET_DEFAULT_MAXSIZE);
 
-	InitGPOPT();
+		InitGPOPT();
+	}
 #endif
 
 	/*
@@ -720,6 +725,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 		RegisterTimeout(IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
 						IdleInTransactionSessionTimeoutHandler);
 		RegisterTimeout(IDLE_GANG_TIMEOUT, IdleGangTimeoutHandler);
+		RegisterTimeout(GP_PARALLEL_RETRIEVE_CURSOR_CHECK_TIMEOUT, GpParallelRetrieveCursorCheckTimeoutHandler);
 		RegisterTimeout(CLIENT_CONNECTION_CHECK_TIMEOUT, ClientCheckTimeoutHandler);
 	}
 
@@ -1154,6 +1160,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	}
 
 	SetDatabasePath(fullpath);
+	pfree(fullpath);
 
 	/*
 	 * It's now possible to do real access to the system catalogs.
@@ -1254,7 +1261,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	 * report this backend in the PgBackendStatus array, meanwhile, we do not
 	 * want users to see auxiliary background worker like fts in pg_stat_* views.
 	 */
-	if (!bootstrap && !amAuxiliaryBgWorker())
+	if (!bootstrap && (!amAuxiliaryBgWorker() || IsDtxRecoveryProcess()))
 		pgstat_bestart();
 
 	/* 
@@ -1455,10 +1462,13 @@ ShutdownPostgres(int code, Datum arg)
 	ReportOOMConsumption();
 
 #ifdef USE_ORCA
-	TerminateGPOPT();
+	if (Gp_role == GP_ROLE_DISPATCH)
+	{
+		TerminateGPOPT();
 
-	if (OptimizerMemoryContext != NULL)
-		MemoryContextDelete(OptimizerMemoryContext);
+		if (OptimizerMemoryContext != NULL)
+			MemoryContextDelete(OptimizerMemoryContext);
+	}
 #endif
 
 	/* Disable memory protection */
@@ -1531,6 +1541,36 @@ ClientCheckTimeoutHandler(void)
 	CheckClientConnectionPending = true;
 	InterruptPending = true;
 	SetLatch(&MyProc->procLatch);
+}
+
+static void
+GpParallelRetrieveCursorCheckTimeoutHandler(void)
+{
+	/*
+	 * issue: https://github.com/greenplum-db/gpdb/issues/15143
+	 *
+	 * handle errors of parallel retrieve cursor's non-root slices
+	 */
+	if (DoingCommandRead)
+	{
+		Assert(Gp_role == GP_ROLE_DISPATCH);
+
+		/* It calls cdbdisp_checkForCancel(), which doesn't raise error */
+		gp_check_parallel_retrieve_cursor_error();
+		int num = GetNumOfParallelRetrieveCursors();
+
+		/* Reset the alarm to check after a timeout */
+		if (num > 0)
+		{
+			elog(DEBUG1, "There are still %d parallel retrieve cursors alive", num);
+			enable_parallel_retrieve_cursor_check_timeout();
+		}
+	}
+	else
+	{
+		elog(DEBUG1, "DoingCommandRead is false, check parallel cursor timeout delay");
+		enable_parallel_retrieve_cursor_check_timeout();
+	}
 }
 
 /*

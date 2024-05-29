@@ -1930,8 +1930,10 @@ getDtxCheckPointInfo(char **result, int *result_size)
 	gxid_array = &gxact_checkpoint->committedGxidArray[0];
 
 	actual = 0;
+	LWLockAcquire(CommittedGxidArrayLock, LW_SHARED);
 	for (; actual < *shmNumCommittedGxacts; actual++)
 		gxid_array[actual] = shmCommittedGxidArray[actual];
+	LWLockRelease(CommittedGxidArrayLock);
 
 	SIMPLE_FAULT_INJECTOR("checkpoint_dtx_info");
 
@@ -2009,7 +2011,8 @@ CreateDistributedSnapshot(DistributedSnapshot *ds)
 	ProcArrayStruct *arrayP = procArray;
 
 	Assert(LWLockHeldByMe(ProcArrayLock));
-	if (*shmNumCommittedGxacts != 0)
+	/* Hot standby accepts query while constantly replaying dtx, so this ERROR doesn't apply. */
+	if (!IS_HOT_STANDBY_QD() && *shmNumCommittedGxacts != 0)
 		elog(ERROR, "Create distributed snapshot before DTM recovery finish");
 
 	xmin = xmax = ShmemVariableCache->latestCompletedGxid + 1;
@@ -2024,8 +2027,44 @@ CreateDistributedSnapshot(DistributedSnapshot *ds)
 	Assert(ds->inProgressXidArray != NULL);
 
 	/*
+	 * For a hot standby QD, check shmCommittedGxidArray to build the knowledge.
+	 * Need to acquire shared lock to access the committed gxid array as the
+	 * startup process might modify it.
+	 */
+	if (IS_HOT_STANDBY_QD())
+	{
+		LWLockAcquire(CommittedGxidArrayLock, LW_SHARED);
+		for (i = 0; i < *shmNumCommittedGxacts; i++)
+		{
+			DistributedTransactionId gxid;
+
+			gxid = shmCommittedGxidArray[i];
+
+			if (gxid == InvalidDistributedTransactionId || gxid >= xmax)
+				continue;
+
+			if (gxid < xmin)
+				xmin = gxid;
+
+			ds->inProgressXidArray[count++] = gxid;
+		}
+		LWLockRelease(CommittedGxidArrayLock);
+	}
+
+	/*
 	 * Gather up current in-progress global transactions for the distributed
 	 * snapshot.
+	 *
+	 * Note: The inProgressXidArray built below may contain transactions that
+	 * have been prepared on some/all segments, and for which the QD hasn't
+	 * begun the COMMIT phase (by writing a XLOG_XACT_DISTRIBUTED_COMMIT record).
+	 * The gxids of these transactions don't necessarily have to be placed into
+	 * inProgressXidArray, for correctness. This is because for visibility
+	 * checks on the QEs, a state of DISTRIBUTEDSNAPSHOT_COMMITTED_UNKNOWN will
+	 * be encountered for such txs, prompting a local check. The local check will
+	 * always find these txs in progress (due to the dummy PGXACTs being
+	 * recorded for prepared txs). So, hypothetically we could exclude these txs
+	 * here, but we don't currently track them on the QD, so we can't.
 	 */
 	for (i = 0; i < arrayP->numProcs; i++)
 	{
@@ -4125,6 +4164,32 @@ FindProcByGpSessionId(long gp_session_id)
 	return NULL;
 }
 
+/*
+ * Get a list of session IDs that belong to each running process.
+ *
+ * Note that for quick grab-and-go we do not validate or deduplicate the result
+ * here (e.g. the invalid session ID "-1" could appear multiple times).
+ */
+List *
+GetRunningProcSessionIds(void)
+{
+	ProcArrayStruct *arrayP = procArray;
+	int			index;
+	List 			*list = NIL;
+
+	LWLockAcquire(ProcArrayLock, LW_SHARED);
+
+	for (index = 0; index < arrayP->numProcs; index++)
+	{
+		PGPROC	   *proc = &allProcs[arrayP->pgprocnos[index]];
+			
+		list = lappend_oid(list, proc->mppSessionId);
+	}
+		
+	LWLockRelease(ProcArrayLock);
+	return list;
+}
+
 /* ----------------------------------------------
  *		KnownAssignedTransactions sub-module
  * ----------------------------------------------
@@ -5130,39 +5195,214 @@ GetSessionIdByPid(int pid)
 /*
  * Set the destination group slot or group id in PGPROC, and send a signal to the proc.
  * slot is NULL on QE.
+ * The process we want to notify on coordinator can act as executor(GP_ROLE_EXECUTE) in case of
+ * entrydb. 'isExecutor' helps us to determine a process to which we need to send signal.
  */
-void
-ResGroupSignalMoveQuery(int sessionId, void *slot, Oid groupId)
+bool
+ResGroupMoveSignalTarget(int sessionId, void *slot, Oid groupId,
+						 bool isExecutor)
 {
-	pid_t pid;
-	BackendId backendId;
+	pid_t		pid;
+	BackendId	backendId;
 	ProcArrayStruct *arrayP = procArray;
+	bool		sent = false;
+	bool		found = false;
+
+	Assert(groupId != InvalidOid);
+	Assert(Gp_role == GP_ROLE_DISPATCH || Gp_role == GP_ROLE_EXECUTE);
+	AssertImply(Gp_role == GP_ROLE_EXECUTE, isExecutor);
 
 	LWLockAcquire(ProcArrayLock, LW_SHARED);
 	for (int i = 0; i < arrayP->numProcs; i++)
 	{
-		volatile PGPROC *proc = &allProcs[arrayP->pgprocnos[i]];
+		PGPROC	   *proc = &allProcs[arrayP->pgprocnos[i]];
+
 		if (proc->mppSessionId != sessionId)
+			continue;
+
+		/*
+		 * Before, we didn't distinguish entrydb processes from main target
+		 * process on coordinator. There was a case with entrydb executors
+		 * when we can send a signal to target process only, but not to
+		 * entrydb executor process or vice versa. As a mediocre solution we
+		 * assume mppIsWriter for entrydb processes is always false.
+		 *
+		 * We can send a signal to target or entrydb processes only from QD.
+		 * The second (XOR) part of condition checks did we find entrydb
+		 * (isExecutor && !mppIsWriter) or target (!isExecutor &&
+		 * mppIsWriter). If neither, we continue the search.
+		 */
+		if (Gp_role == GP_ROLE_DISPATCH && !(isExecutor ^ proc->mppIsWriter))
+			continue;
+
+		found = true;
+		pid = proc->pid;
+		backendId = proc->backendId;
+
+		SpinLockAcquire(&proc->movetoMutex);
+		/* only target process needs slot and callerPid to operate */
+		if (Gp_role == GP_ROLE_DISPATCH && proc->mppIsWriter)
+		{
+			/*
+			 * movetoCallerPid is a guard which marks there is currently
+			 * active initiator process
+			 */
+			if (proc->movetoCallerPid != InvalidPid)
+			{
+				SpinLockRelease(&proc->movetoMutex);
+				elog(NOTICE, "cannot move process, which is already moving");
+				break;
+			}
+			Assert(proc->movetoCallerPid == InvalidPid);
+			Assert(proc->movetoResSlot == NULL);
+			Assert(slot != NULL);
+
+			proc->movetoResSlot = slot;
+			proc->movetoCallerPid = MyProc->pid;
+		}
+		proc->movetoGroupId = groupId;
+		SpinLockRelease(&proc->movetoMutex);
+
+		if (SendProcSignal(pid, PROCSIG_RESOURCE_GROUP_MOVE_QUERY, backendId))
+		{
+			SpinLockAcquire(&proc->movetoMutex);
+			if (Gp_role == GP_ROLE_DISPATCH && proc->mppIsWriter)
+			{
+				proc->movetoResSlot = NULL;
+				proc->movetoCallerPid = InvalidPid;
+			}
+			proc->movetoGroupId = InvalidOid;
+			SpinLockRelease(&proc->movetoMutex);
+
+			/*
+			 * It's not an error, if we can't notify, for example, already
+			 * finished QE process (because of async nature of resgroup
+			 * moving). If we can't notify QD, the caller should raise an
+			 * error by itself, based on returned value.
+			 */
+			elog(NOTICE, "cannot send signal to backend %d with PID %d",
+				 backendId, pid);
+		}
+		else
+			sent = true;
+
+		/*
+		 * Don't break for executors, need to signal all the procs of this
+		 * session. It's safe to break if we are QD, because we want to notify
+		 * only one process at once - main target or entrydb.
+		 */
+		if (Gp_role == GP_ROLE_DISPATCH)
+			break;
+	}
+	LWLockRelease(ProcArrayLock);
+
+	if (!found && !isExecutor)
+		elog(NOTICE, "cannot find target process");
+
+	return sent;
+}
+
+/*
+ * Check if slot control is on the target side and clean all target's
+ * moveto* params.
+ *
+ * Cleaning and checking should be performed as one atomic operation inside one
+ * mutex.
+ * 'clean' flag is bidirectional. If 'clean' is set to true, then all moveto*
+ * params will be cleaned, no matter was target handled them or not.
+ * More, it will be forcefully set to true, if target process handled our
+ * command. Thus, if function returned true in 'clean', it should be treated
+ * as terminal state and all new calls to ResGroupMoveCheckTargetReady()
+ * before calling ResGroupMoveSignalTarget() make no sense.
+ */
+void
+ResGroupMoveCheckTargetReady(int sessionId, bool *clean, bool *result)
+{
+	pid_t		pid;
+	BackendId	backendId;
+	ProcArrayStruct *arrayP = procArray;
+
+	Assert(Gp_role == GP_ROLE_DISPATCH);
+
+	*result = false;
+
+	LWLockAcquire(ProcArrayLock, LW_SHARED);
+	for (int i = 0; i < arrayP->numProcs; i++)
+	{
+		PGPROC	   *proc = &allProcs[arrayP->pgprocnos[i]];
+
+		/*
+		 * Also ignore entrydb processes. We use mppIsWriter which described
+		 * in ResGroupMoveSignalTarget().
+		 */
+		if (proc->mppSessionId != sessionId || !proc->mppIsWriter)
 			continue;
 
 		pid = proc->pid;
 		backendId = proc->backendId;
-		if (Gp_role == GP_ROLE_DISPATCH)
+
+		SpinLockAcquire(&proc->movetoMutex);
+		/* If proc->movetoCallerPid not equals to MyProc->pid, the target
+		 * process could is handling signal from another caller.After we
+		 * get the movetoMutex check it again.
+		 */
+		if (proc->movetoCallerPid == MyProc->pid)
 		{
-			Assert(proc->movetoResSlot == NULL);
-			Assert(slot != NULL);
-			proc->movetoResSlot = slot;
-			SendProcSignal(pid, PROCSIG_RESOURCE_GROUP_MOVE_QUERY, backendId);
-			break;
+			/*
+			 * InvalidOid of movetoGroupId means target process tried to
+			 * handle our command
+			 */
+			if (proc->movetoGroupId == InvalidOid)
+			{
+				/*
+				 * empty movetoResSlot means target process got all the
+				 * control over slot
+				 */
+				*result = (proc->movetoResSlot == NULL);
+				*clean = true;
+			}
+
+			/*
+			 * Clean all params, especially movetoCallerPid, which guards
+			 * target processes from another initiators. After releasing
+			 * spinlock any other process allowed to start new move command.
+			 */
+			if (*clean)
+			{
+				proc->movetoResSlot = NULL;
+				proc->movetoGroupId = InvalidOid;
+				proc->movetoCallerPid = InvalidPid;
+			}
 		}
-		else if (Gp_role == GP_ROLE_EXECUTE)
-		{
-			Assert(groupId != InvalidOid);
-			Assert(proc->movetoGroupId == InvalidOid);
-			proc->movetoGroupId = groupId;
-			SendProcSignal(pid, PROCSIG_RESOURCE_GROUP_MOVE_QUERY, backendId);
-			/* don't break, need to signal all the procs of this session */
-		}
+		SpinLockRelease(&proc->movetoMutex);
+		break;
+	}
+	LWLockRelease(ProcArrayLock);
+}
+
+/*
+ * Notify initiator process that target process is ready to move to a new
+ * group. This is an optional feature to speed up initiator's awakening.
+ * Inititator will get the actual command result by changed movetoResSlot
+ * and movetoGroupId values.
+ */
+void
+ResGroupMoveNotifyInitiator(pid_t callerPid)
+{
+	ProcArrayStruct *arrayP = procArray;
+
+	Assert(Gp_role == GP_ROLE_DISPATCH);
+
+	LWLockAcquire(ProcArrayLock, LW_SHARED);
+	for (int i = 0; i < arrayP->numProcs; i++)
+	{
+		PGPROC	   *proc = &allProcs[arrayP->pgprocnos[i]];
+
+		if (proc->pid != callerPid)
+			continue;
+
+		SetLatch(&proc->procLatch);
+		break;
 	}
 	LWLockRelease(ProcArrayLock);
 }

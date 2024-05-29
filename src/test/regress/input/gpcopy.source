@@ -2,6 +2,23 @@
 -- This test suite tests COPY code that is unique to greenplum db.
 --
 
+--
+-- Test copying from program, simulating an exit condition in the child process
+-- before the file is re-imaged with exec. The child should exit gracefully.
+-- Earlier, we used to call exit() instead of _exit(), and that would lead to
+-- the child spuriously calling the parent's atexit handlers (which it inherited
+-- from the child). This invariably led to corruption of the child and parent's
+-- shared PGPROC, with the possibility of PANICs inside LockRefindAndRelease()
+-- and downstream assertion failures, related to PGPROC release and init.
+--
+CREATE TABLE exit_in_child(i int);
+SELECT gp_inject_fault('popen_with_stderr_in_child',
+                       'exit_no_callbacks', '', '', '', 1, 1, /* exit code */ 1, dbid)
+    FROM gp_segment_configuration WHERE content=-1 AND role='p';
+COPY exit_in_child FROM PROGRAM 'echo 1';
+SELECT gp_inject_fault('popen_with_stderr_in_child', 'reset', dbid)
+    FROM gp_segment_configuration WHERE content=-1 AND role='p';
+
 -- ######################################################
 -- different distribution columns and distribution types
 -- ######################################################
@@ -669,7 +686,7 @@ COPY (SELECT * FROM segment_reject_limit_from) TO '/tmp/segment_reject_limit<SEG
 -- 'COPY (SELECT ...) TO' on utility mode
 CREATE EXTERNAL WEB TABLE copy_cmd_utility(a text, b int)
   EXECUTE E'PGOPTIONS="-c gp_role=utility" \\
-    psql -p $GP_MASTER_PORT $GP_DATABASE $GP_USER -c \\
+    psql -X -p $GP_MASTER_PORT $GP_DATABASE $GP_USER -c \\
       "COPY (SELECT * FROM pg_class) TO \'/dev/null\'"'
   ON COORDINATOR FORMAT 'text' (DELIMITER ' ');
 SELECT a FROM copy_cmd_utility;
@@ -1376,3 +1393,14 @@ COPY issue_14353_multi_dist FROM '/tmp/issue_14353_multi_dist_<SEGID>.csv' WITH 
 -- Test that gpdb emits an error message saying the data distribution is malformed.
 \! cp /tmp/issue_14353_multi_dist_1.csv /tmp/issue_14353_multi_dist_0.csv
 COPY issue_14353_multi_dist FROM '/tmp/issue_14353_multi_dist_<SEGID>.csv' WITH CSV DELIMITER ',' ON SEGMENT;
+
+-- special case about distributed replicated table, please refer to issue-14126 and issue-16250
+\set QUIET off
+CREATE TABLE replicated_issue_16250(c1 int, c2 text) distributed replicated;
+COPY replicated_issue_16250 FROM '@abs_srcdir@/data/empty.data';
+DROP TABLE replicated_issue_16250;
+
+CREATE TABLE replicated_issue_14126(c1 int, c2 text) distributed replicated;
+COPY replicated_issue_14126 FROM '@abs_srcdir@/data/copy.data' DELIMITER ',';
+DROP TABLE replicated_issue_14126;
+\set QUIET on

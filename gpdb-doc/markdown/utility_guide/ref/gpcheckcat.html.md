@@ -22,6 +22,7 @@ gpcheckcat [ <options<] [ <dbname>]
      -B <parallel_processes>
      -v
      -A
+     -x "<parameter_name>=<value>"
 
 gpcheckcat  -l 
 
@@ -90,6 +91,8 @@ Catalog inconsistencies are inconsistencies that occur between Greenplum Databas
 
     `missing_extraneous` - Cross consistency check for missing or extraneous entries
 
+    `mix_distribution_policy` - Check `pg_opclass` and `pg_amproc` to identify tables using a mix of legacy and non-legacy hashops in their distribution policies.
+
     `owner` - Check table ownership that is inconsistent with the coordinator database
 
     `orphaned_toast_tables` - Check for orphaned TOAST tables.
@@ -97,8 +100,6 @@ Catalog inconsistencies are inconsistencies that occur between Greenplum Databas
     > **Note** There are several ways a TOAST table can become orphaned where a repair script cannot be generated and a manual catalog change is required. One way is if the `reltoastrelid` entry in *pg\_class* points to an incorrect TOAST table \(a TOAST table mismatch\). Another way is if both the `reltoastrelid` in *pg\_class* is missing and the `pg_depend` entry is missing \(a double orphan TOAST table\). If a manual catalog change is needed, `gpcheckcat` will display detailed steps you can follow to update the catalog. Contact VMware Support if you need help with the catalog change.
 
     `part_integrity` - Check *pg\_partition* branch integrity, partition with OIDs, partition distribution policy
-
-    `part_constraint` - Check constraints on partitioned tables
 
     `unique_index_violation` - Check tables that have columns with the unique index constraint for duplicate entries
 
@@ -126,6 +127,9 @@ Catalog inconsistencies are inconsistencies that occur between Greenplum Databas
 
 -v \(verbose\)
 :   Displays detailed information about the tests that are performed.
+
+-x "<parameter_name>=<value>"
+:   Set a server configuration parameter, such as `log_min_messages`, at a session level. To set multiple configuration parameters, use the `-x` option multiple times. 
 
 ## <a id="notes"></a>Notes 
 

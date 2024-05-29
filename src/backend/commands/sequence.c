@@ -254,7 +254,7 @@ DefineSequence(ParseState *pstate, CreateSeqStmt *seq)
 	stmt->if_not_exists = seq->if_not_exists;
 	stmt->relKind = RELKIND_SEQUENCE;
 	stmt->ownerid = GetUserId();
-	stmt->gp_style_alter_part = false;
+	stmt->origin = ORIGIN_NO_GEN;
 
 	address = DefineRelation(stmt, RELKIND_SEQUENCE, seq->ownerId, NULL, NULL,
 							 false, /* dispatch */
@@ -1314,7 +1314,7 @@ init_sequence_internal(Oid _relid, SeqTable *p_elm, Relation *p_rel,
 	 * discard any cached-but-unissued values.  We do not touch the currval()
 	 * state, however.
 	 */
-	if (seqrel->rd_rel->relfilenode != elm->filenode && called_from_dispatcher)
+	if (seqrel->rd_rel->relfilenode != elm->filenode)
 	{
 		elm->filenode = seqrel->rd_rel->relfilenode;
 		elm->cached = elm->last;
@@ -1794,12 +1794,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 	}
 	else if (isInit)
 	{
-		/*
-		 * PostgreSQL default value is 1, GPDB privately bump up to 20.
-		 * If a sequence in UDF, QE executor need to apply sequence value from QD.
-		 * Frequent sequence application is network bottleneck for query execution.
-		 */
-		seqform->seqcache = 20;
+		seqform->seqcache = SEQ_CACHE_DEFAULT;
 	}
 }
 

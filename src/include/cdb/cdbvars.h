@@ -19,6 +19,7 @@
 #ifndef CDBVARS_H
 #define CDBVARS_H
 
+#include "access/xlog.h"  /*RecoveryInProgress*/
 #include "access/xlogdefs.h"  /*XLogRecPtr*/
 #include "catalog/gp_segment_configuration.h" /* COORDINATOR_CONTENT_ID */
 
@@ -121,6 +122,9 @@ extern int			gp_reject_percent_threshold;
  * "invisible" rows are returned.
  */
 extern bool           gp_select_invisible;
+
+/* Detect if the current partitioning of the table or data distribution is correct */
+extern bool			gp_detect_data_correctness;
 
 /*
  * Used to set the maximum length of the current query which is displayed
@@ -309,6 +313,15 @@ typedef enum GpVars_Interconnect_Address_Type
 
 extern int Gp_interconnect_address_type;
 
+typedef enum GpVars_Postmaster_Address_Family_Type
+{
+	POSTMASTER_ADDRESS_FAMILY_TYPE_AUTO = 0,
+	POSTMASTER_ADDRESS_FAMILY_TYPE_IPV4 = 1,
+	POSTMASTER_ADDRESS_FAMILY_TYPE_IPV6 = 2,
+} GpVars_Postmaster_Address_Family_Type;
+
+extern int Gp_postmaster_address_family_type;
+
 extern char *gp_interconnect_proxy_addresses;
 
 typedef enum GpVars_Interconnect_Method
@@ -341,6 +354,16 @@ extern int	Gp_interconnect_queue_depth;
  *
  */
 extern int	Gp_interconnect_snd_queue_depth;
+
+/*
+ * Cursor IC table size.
+ *
+ * For cursor case, there may be several concurrent interconnect
+ * instances on QD. The table is used to track the status of the
+ * instances, which is quite useful for "ACK the past and NAK the future" paradigm.
+ *
+ */
+extern int  Gp_interconnect_cursor_ic_table_size;
 extern int	Gp_interconnect_timer_period;
 extern int	Gp_interconnect_timer_checking_period;
 extern int	Gp_interconnect_default_rtt;
@@ -524,7 +547,6 @@ extern bool gp_adjust_selectivity_for_outerjoins;
  * Target density for hash-node (HJ).
  */
 extern int gp_hashjoin_tuples_per_bucket;
-extern int gp_hashagg_groups_per_bucket;
 
 /*
  * Damping of selectivities of clauses which pertain to the same base
@@ -602,6 +624,11 @@ extern int explain_memory_verbosity;
  */
 extern bool gp_enable_sort_limit;
 
+/*
+ * May planner consider regular Index Scans on append-optimized tables?
+ */
+extern bool gp_enable_ao_indexscan;
+
 extern bool trace_sort;
 
 /**
@@ -623,11 +650,6 @@ extern int gp_segworker_relative_priority;
 /*  Max size of dispatched plans; 0 if no limit */
 extern int gp_max_plan_size;
 
-/* The default number of batches to use when the hybrid hashed aggregation
- * algorithm (re-)spills in-memory groups to disk.
- */
-extern int gp_hashagg_default_nbatches;
-
 /* Get statistics for partitioned parent from a child */
 extern bool 	gp_statistics_pullup_from_child_partition;
 
@@ -636,6 +658,9 @@ extern bool		gp_statistics_use_fkeys;
 
 /* Allow user to force tow stage agg */
 extern bool     gp_eager_two_phase_agg;
+
+/* Force redistribution of insert into randomly-distributed table */
+extern bool     gp_force_random_redistribution;
 
 /* Analyze tools */
 extern int gp_motion_slice_noop;
@@ -652,6 +677,7 @@ extern bool dml_ignore_target_partition_check;
 extern int gp_workfile_limit_per_segment;
 extern int gp_workfile_limit_per_query;
 extern int gp_workfile_limit_files_per_query;
+extern int gp_workfile_compression_overhead_limit;
 extern int gp_workfile_caching_loglevel;
 extern int gp_sessionstate_loglevel;
 extern int gp_workfile_bytes_to_checksum;
@@ -672,6 +698,7 @@ typedef enum
 									 * insert if no stats are present */
 } GpAutoStatsModeValue;
 
+extern bool	gp_autostats_lock_wait;
 extern int	gp_autostats_mode;
 extern int	gp_autostats_mode_in_functions;
 extern int	gp_autostats_on_change_threshold;
@@ -728,8 +755,10 @@ extern GpId GpIdentity;
 
 #define UNINITIALIZED_GP_IDENTITY_VALUE (-10000)
 #define IS_QUERY_DISPATCHER() (GpIdentity.segindex == COORDINATOR_CONTENT_ID)
+#define IS_HOT_STANDBY_QD() (EnableHotStandby && IS_QUERY_DISPATCHER() && RecoveryInProgress())
 
 #define IS_QUERY_EXECUTOR_BACKEND() (Gp_role == GP_ROLE_EXECUTE && gp_session_id > 0)
+#define IS_HOT_STANDBY_QE() (EnableHotStandby && IS_QUERY_EXECUTOR_BACKEND() && RecoveryInProgress())
 
 /* Stores the listener port that this process uses to listen for incoming
  * Interconnect connections from other Motion nodes.

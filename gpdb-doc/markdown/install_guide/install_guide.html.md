@@ -5,7 +5,7 @@ title: Installing and Upgrading Greenplum
 Information about installing, configuring, and upgrading Greenplum Database software and configuring Greenplum Database host machines.
 
 -   **[Platform Requirements](platform-requirements-overview.html)**  
-This topic describes the Greenplum Database 6 platform and operating system software requirements.
+This topic describes the Greenplum Database 7 platform and operating system software requirements.
 -   **[Estimating Storage Capacity](capacity_planning.html)**  
 To estimate how much data your Greenplum Database system can accommodate, use these measurements as guidelines. Also keep in mind that you may want to have extra space for landing backup files and data load files on each segment host.
 -   **[Configuring Your Systems](prep_os.html)**  
@@ -24,8 +24,8 @@ Information about installing optional VMware Greenplum Database extensions and p
 The Greenplum Database distribution includes several PostgreSQL- and Greenplum-sourced `contrib` modules that you have the option to install.
 -   **[Configuring Timezone and Localization Settings](localization.html)**  
 Describes the available timezone and localization features of Greenplum Database.
--   **[Upgrading to Greenplum 6](upgrade_intro.html)**  
-This topic identifies the upgrade paths for upgrading a Greenplum Database 6.x release to a newer 6.x release. The topic also describes the migration paths for migrating VMware Greenplum Database 4.x or 5.x data to Greenplum Database 6.x.
+-   **[Upgrading from Greenplum 6 to Greenplum 7](upgrading_6_to_7.html)**  
+Explains how to upgrade from Greenplum 6 to Greenplum 7. 
 -   **[Enabling iptables \(Optional\)](enable_iptables.html)**  
 On Linux systems, you can configure and enable the `iptables` firewall to work with Greenplum Database.
 -   **[Installation Management Utilities](apx_mgmt_utils.html)**  

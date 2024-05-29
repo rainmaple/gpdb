@@ -42,6 +42,10 @@ using UlongToIntMap =
 	CHashMap<ULONG, INT, gpos::HashValue<ULONG>, gpos::Equals<ULONG>,
 			 CleanupDelete<ULONG>, CleanupDelete<INT>>;
 
+// iterator
+using UlongToIntMapIter =
+	CHashMapIter<ULONG, INT, gpos::HashValue<ULONG>, gpos::Equals<ULONG>,
+				 CleanupDelete<ULONG>, CleanupDelete<INT>>;
 // hash maps ULONG -> array of ULONGs
 using UlongToUlongPtrArrayMap =
 	CHashMap<ULONG, ULongPtrArray, gpos::HashValue<ULONG>, gpos::Equals<ULONG>,
@@ -142,6 +146,13 @@ private:
 									  UlongToColRefMap *colref_mapping,
 									  BOOL must_exist);
 
+	// helper method to add attno information where the column ids have been
+	// remapped
+	static void AddAttnoInfoWithRemap(CMemoryPool *mp, UlongToIntMap *src_attno,
+									  UlongToIntMap *dest_attno,
+									  UlongToColRefMap *colref_mapping,
+									  BOOL must_exist);
+
 public:
 	CStatistics &operator=(CStatistics &) = delete;
 
@@ -172,6 +183,12 @@ public:
 
 	// actual number of rows
 	CDouble Rows() const override;
+
+	void
+	SetRows(CDouble rows) override
+	{
+		m_rows = rows;
+	}
 
 	ULONG
 	RelPages() const override
@@ -221,8 +238,15 @@ public:
 	// look up the number of distinct values of a particular column
 	CDouble GetNDVs(const CColRef *colref) override;
 
+	// look up the fraction of nulls for a particular column
+	CDouble GetNullFreq(const CColRef *colref) override;
+
 	// look up the width of a particular column
 	virtual const CDouble *GetWidth(ULONG colid) const;
+
+	// Compute stats of a given column
+	IStatistics *ComputeColStats(CMemoryPool *mp, CColRef *colref,
+								 IMDId *rel_mdid) override;
 
 	// the risk of errors in cardinality estimation
 	ULONG

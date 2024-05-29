@@ -256,8 +256,6 @@ plan_tree_walker(Node *node,
 				return true;
 			if (walker(((CustomScan *) node)->custom_exprs, context))
 				return true;
-			if (walker(((CustomScan *) node)->custom_private, context))
-				return true;
 			if (walker(((CustomScan *) node)->custom_scan_tlist, context))
 				return true;
 			break;
@@ -294,6 +292,7 @@ plan_tree_walker(Node *node,
 
 		case T_IndexScan:
 		case T_DynamicIndexScan:
+		case T_DynamicIndexOnlyScan:
 			if (walk_scan_node_fields((Scan *) node, walker, context))
 				return true;
 			if (walker((Node *) ((IndexScan *) node)->indexqual, context))

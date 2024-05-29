@@ -1591,15 +1591,22 @@ get_oprjoin(Oid opno)
 /*				---------- TRIGGER CACHE ----------					 */
 
 
-/* Does table have update triggers? */
+/*
+ * Does table have update triggers?
+ *
+ * From Greenplum 7, the Postgres planner expands partitioned table's children,
+ * including directly and indirectly, and generates a plan for each child table,
+ * but ORCA doesn't do that.
+ *
+ * So having an extra parameter including_children only for ORCA.
+ */
 bool
-has_update_triggers(Oid relid)
+has_update_triggers(Oid relid, bool including_children)
 {
 	Relation	relation;
 	bool		result = false;
 
-	/* Assume the caller already holds a suitable lock. */
-	relation = table_open(relid, NoLock);
+	relation = RelationIdGetRelation(relid);
 
 	if (relation->rd_rel->relhastriggers)
 	{
@@ -1616,15 +1623,33 @@ has_update_triggers(Oid relid)
 				found = trigger_enabled(trigger.tgoid) &&
 					(get_trigger_type(trigger.tgoid) & TRIGGER_TYPE_UPDATE) == TRIGGER_TYPE_UPDATE;
 				if (found)
+				{
+					result = true;
 					break;
+				}
+			}
+		}
+	}
+
+	if (including_children && !result && relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		List	   *partitions = find_inheritance_children(relid, NoLock);
+		ListCell   *lc;
+
+		foreach(lc, partitions)
+		{
+			Oid			partrelid = lfirst_oid(lc);
+			if (has_update_triggers(partrelid, true))
+			{
+				result = true;
+				break;
 			}
 		}
 
-		/* GPDB_96_MERGE_FIXME: Why is this not allowed? */
-		if (found || child_triggers(relation->rd_id, TRIGGER_TYPE_UPDATE))
-			result = true;
+		list_free(partitions);
 	}
-	table_close(relation, NoLock);
+
+	RelationClose(relation);
 
 	return result;
 }
@@ -2257,29 +2282,6 @@ get_func_support(Oid funcid)
 }
 
 /*
- * func_data_access
- *		Given procedure id, return the function's data access flag.
- */
-char
-func_data_access(Oid funcid)
-{
-	HeapTuple	tp;
-	char		result;
-	bool		isnull;
-
-	tp = SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid));
-	if (!HeapTupleIsValid(tp))
-		elog(ERROR, "cache lookup failed for function %u", funcid);
-
-	result = DatumGetChar(
-		SysCacheGetAttr(PROCOID, tp, Anum_pg_proc_prodataaccess, &isnull));
-	ReleaseSysCache(tp);
-
-	Assert(!isnull);
-	return result;
-}
-
-/*
  * func_exec_location
  *		Given procedure id, return the function's proexeclocation field
  */
@@ -2343,6 +2345,32 @@ get_relnatts(Oid relid)
 		return InvalidAttrNumber;
 }
 #endif
+
+/*
+ * get_rel_am
+ *		Returns the access method of a given relation.
+ *
+ * Returns InvalidOid if there is no such relation or if the relation is not an
+ * index or a table.
+ */
+Oid
+get_rel_am(Oid relid)
+{
+	HeapTuple       tp;
+
+	tp = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (HeapTupleIsValid(tp))
+	{
+		Form_pg_class reltup = (Form_pg_class) GETSTRUCT(tp);
+		Oid       result;
+
+		result = reltup->relam;
+		ReleaseSysCache(tp);
+		return result;
+	}
+
+	return InvalidOid;
+}
 
 /*
  * get_rel_name
@@ -4035,7 +4063,13 @@ get_relation_keys(Oid relid)
 		{
 			continue;
 		}
-			
+
+		// skip the constraint if deferrable
+		if (contuple->condeferrable)
+		{
+			continue;
+		}
+
 		// store key set in an array
 		List *key = NIL;
 		
@@ -4550,63 +4584,3 @@ child_distribution_mismatch(Relation rel)
 	return false;
 }
 
-/*
- *  child_triggers
- *  Return true if the table is partitioned and any of the child partitions
- *  have a trigger of the given type.
- */
-bool
-child_triggers(Oid relationId, int32 triggerType)
-{
-/* GPDB_12_MERGE_FIXME */
-	return false;
-#if 0
-	Assert(InvalidOid != relationId);
-	if (PART_STATUS_NONE == rel_part_status(relationId))
-	{
-		/* not a partitioned table */
-		return false;
-	}
-
-	List *childOids = find_all_inheritors(relationId, NoLock, NULL);
-	ListCell *lc;
-
-	bool found = false;
-	foreach (lc, childOids)
-	{
-		Oid oidChild = lfirst_oid(lc);
-		Relation relChild = RelationIdGetRelation(oidChild);
-		Assert(NULL != relChild);
-
-		if (relChild->rd_rel->relhastriggers && NULL == relChild->trigdesc)
-		{
-			RelationBuildTriggers(relChild);
-			if (NULL == relChild->trigdesc)
-			{
-				relChild->rd_rel->relhastriggers = false;
-			}
-		}
-
-		if (relChild->rd_rel->relhastriggers)
-		{
-			for (int i = 0; i < relChild->trigdesc->numtriggers && !found; i++)
-			{
-				Trigger trigger = relChild->trigdesc->triggers[i];
-				found = trigger_enabled(trigger.tgoid) &&
-						(get_trigger_type(trigger.tgoid) & triggerType) == triggerType;
-			}
-		}
-
-		RelationClose(relChild);
-		if (found)
-		{
-			break;
-		}
-	}
-
-	list_free(childOids);
-	
-	/* no child triggers matching the given type */
-	return found;
-#endif
-}

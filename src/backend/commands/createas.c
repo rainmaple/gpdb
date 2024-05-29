@@ -132,7 +132,7 @@ create_ctas_internal(List *attrList, IntoClause *into, QueryDesc *queryDesc, boo
 	create->oncommit = into->onCommit;
 	create->tablespacename = into->tableSpaceName;
 	create->if_not_exists = false;
-	create->gp_style_alter_part = false;
+	create->origin = ORIGIN_NO_GEN;
 
 	create->distributedBy = NULL; /* We will pass a pre-made intoPolicy instead */
 	create->partitionBy = NULL; /* CTAS does not not support partition. */
@@ -444,11 +444,7 @@ ExecCreateTableAs(CreateTableAsStmt *stmt, const char *queryString,
 	}
 	else
 	{
-		if (ShouldUnassignResGroup())
-		{
-			bool inFunction = already_under_executor_run() || utility_nested();
-			ShouldBypassQuery(queryDesc->plannedstmt, inFunction);
-		}
+		check_and_unassign_from_resgroup(queryDesc->plannedstmt);
 		queryDesc->plannedstmt->query_mem = ResourceManagerGetQueryMemoryLimit(queryDesc->plannedstmt);
 
 		/* call ExecutorStart to prepare the plan for execution */

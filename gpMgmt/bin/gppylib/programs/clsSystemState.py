@@ -10,7 +10,7 @@ from optparse import OptionGroup
 import sys, os
 import re
 import collections
-import pgdb
+import psycopg2
 from contextlib import closing
 from gppylib import gparray, gplog
 from gppylib.commands import base, gp
@@ -22,7 +22,6 @@ from gppylib.operations.buildMirrorSegments import get_recovery_progress_file, g
 from gppylib.system import configurationInterface as configInterface
 from gppylib.system.environment import GpCoordinatorEnvironment
 from gppylib.utils import TableLogger
-from gppylib.commands.gp import get_coordinatordatadir
 
 logger = gplog.get_default_logger()
 
@@ -76,6 +75,7 @@ VALUE_RECOVERY_COMPLETED_BYTES = FieldDefinition("Completed bytes (kB)", "recove
 VALUE_RECOVERY_TOTAL_BYTES = FieldDefinition("Total bytes (kB)", "recovery_total_bytes", "int")
 VALUE_RECOVERY_PERCENTAGE = FieldDefinition("Percentage completed", "recovery_percentage", "int")
 VALUE_RECOVERY_TYPE = FieldDefinition("Recovery type", "recovery_type", "int")
+VALUE_RECOVERY_STAGE = FieldDefinition("Stage", "recovery_stage", "text")
 
 CATEGORY__STATUS = "Status"
 VALUE__COORDINATOR_REPORTS_STATUS = FieldDefinition("Configuration reports status as", "status_in_config", "text", "Config status")
@@ -164,7 +164,7 @@ class GpStateData:
                     VALUE__ACTIVE_PID_INT, VALUE__POSTMASTER_PID_VALUE_INT,
                     VALUE__POSTMASTER_PID_FILE, VALUE__POSTMASTER_PID_VALUE, VALUE__LOCK_FILES,
                     VALUE_RECOVERY_COMPLETED_BYTES, VALUE_RECOVERY_TOTAL_BYTES, VALUE_RECOVERY_PERCENTAGE,
-                    VALUE_RECOVERY_TYPE
+                    VALUE_RECOVERY_TYPE,VALUE_RECOVERY_STAGE
                     ]:
             self.__allValues[k] = True
 
@@ -188,7 +188,7 @@ class GpStateData:
         self.__currentSegmentData["values"][key] = value
         self.__currentSegmentData["isWarning"][key] = isWarning
 
-        assert key in self.__allValues;
+        assert key in self.__allValues
 
     def isClusterProbablyDown(self, gpArray):
         """
@@ -682,15 +682,26 @@ class GpSystemStateProgram:
 
         self.__addClusterDownWarning(gpArray, data)
 
-        recovery_progress_file = get_recovery_progress_file(gplog)
-        segments_under_recovery = self._parse_recovery_progress_data(data, recovery_progress_file, gpArray)
-        gprecoverseg_lock_dir = os.path.join(get_coordinatordatadir() + '/gprecoverseg.lock')
-        if segments_under_recovery and os.path.exists(gprecoverseg_lock_dir):
-            logger.info("----------------------------------------------------")
-            logger.info("Segments in recovery")
-            logSegments(segments_under_recovery, False, [VALUE_RECOVERY_TYPE, VALUE_RECOVERY_COMPLETED_BYTES, VALUE_RECOVERY_TOTAL_BYTES,
-                                                          VALUE_RECOVERY_PERCENTAGE])
-            exitCode = 1
+        # Check if gprecoverseg process is running. We do not want to
+        # show the progress if the gprecoverseg process is not running.
+        if gp.is_gprecoverseg_running():
+            recovery_progress_file = get_recovery_progress_file(gplog)
+            segments_under_recovery = self._parse_recovery_progress_data(data, recovery_progress_file, gpArray)
+
+            if segments_under_recovery:
+                logger.info("----------------------------------------------------")
+                logger.info("Segments in recovery")
+                if data.getStrValue(segments_under_recovery[0], VALUE_RECOVERY_TYPE) == "differential":
+                    logSegments(segments_under_recovery, False,
+                                [VALUE_RECOVERY_TYPE, VALUE_RECOVERY_STAGE, VALUE_RECOVERY_COMPLETED_BYTES,
+                                 VALUE_RECOVERY_PERCENTAGE])
+                else:
+                    logSegments(segments_under_recovery, False,
+                                [VALUE_RECOVERY_TYPE, VALUE_RECOVERY_COMPLETED_BYTES, VALUE_RECOVERY_TOTAL_BYTES,
+                                 VALUE_RECOVERY_PERCENTAGE])
+
+
+                exitCode = 1
 
         # final output -- no errors, then log this message
         if exitCode == 0:
@@ -971,13 +982,26 @@ class GpSystemStateProgram:
         with open(recovery_progress_file, 'r') as fp:
             for line in fp:
                 recovery_type, dbid, progress = line.strip().split(':',2)
-                pattern = re.compile(get_recovery_progress_pattern())
-                if re.search(pattern, progress):
-                    bytes, units, precentage_str = progress.strip().split(' ',2)
-                    completed_bytes, total_bytes = bytes.split('/')
-                    percentage = re.search(r'(\d+\%)', precentage_str).group()
-                    recovery_progress_by_dbid[int(dbid)] = [recovery_type, completed_bytes, total_bytes, percentage]
 
+                # Define patterns for identifying different recovery types
+                rewind_bb_pattern = re.compile(get_recovery_progress_pattern())
+                diff_pattern = re.compile(get_recovery_progress_pattern('differential'))
+
+                # Check if the progress matches full,incremental or differential recovery patterns
+                if re.search(rewind_bb_pattern, progress) or re.search(diff_pattern, progress):
+                    stage, total_bytes = "", ""
+                    if recovery_type == "differential":
+                        # Process differential recovery progress.
+                        progress_parts = progress.strip().split(':')
+                        stage = progress_parts[-1]
+                        completed_bytes, percentage = progress_parts[0].split()[:2]
+                    else:
+                        # Process full or incremental recovery progress.
+                        bytes, units, precentage_str = progress.strip().split(' ', 2)
+                        completed_bytes, total_bytes = bytes.split('/')
+                        percentage = re.search(r'(\d+\%)', precentage_str).group()
+
+                    recovery_progress_by_dbid[int(dbid)] = [recovery_type, completed_bytes, total_bytes, percentage, stage]
         # Now the catalog update happens before we run recovery,
         # so now when we query gpArray here, it will have new address/port for the recovering segments
         recovery_progress_segs = []
@@ -986,11 +1010,20 @@ class GpSystemStateProgram:
             if dbid in recovery_progress_by_dbid.keys():
                 data.switchSegment(seg)
                 recovery_progress_segs.append(seg)
-                recovery_type, completed_bytes, total_bytes, percentage = recovery_progress_by_dbid[dbid]
+
+                recovery_type, completed_bytes, total_bytes, percentage, stage = recovery_progress_by_dbid[dbid]
+
+                # Add recovery progress values to GpstateData
                 data.addValue(VALUE_RECOVERY_TYPE, recovery_type)
                 data.addValue(VALUE_RECOVERY_COMPLETED_BYTES, completed_bytes)
-                data.addValue(VALUE_RECOVERY_TOTAL_BYTES, total_bytes)
                 data.addValue(VALUE_RECOVERY_PERCENTAGE, percentage)
+
+                if recovery_type == "differential":
+                    # If differential recovery, add stage information.
+                    data.addValue(VALUE_RECOVERY_STAGE, stage)
+                else:
+                    # If full or incremental, add total bytes' information.
+                    data.addValue(VALUE_RECOVERY_TOTAL_BYTES, total_bytes)
 
         return recovery_progress_segs
 
@@ -1026,7 +1059,7 @@ class GpSystemStateProgram:
                         wal_sync_bytes_out = 'Unknown'
                         unsync_segs.append(s)
                         data.addValue(VALUE__REPL_SYNC_REMAINING_BYTES, wal_sync_bytes_out)
-            except pgdb.InternalError:
+            except (psycopg2.InternalError, psycopg2.OperationalError):
                 logger.warning('could not query segment {} ({}:{})'.format(
                     s.dbid, s.hostname, s.port
                 ))
@@ -1098,7 +1131,7 @@ class GpSystemStateProgram:
 
                     cursor.close()
 
-        except pgdb.InternalError:
+        except (psycopg2.InternalError, psycopg2.OperationalError):
             logger.warning('could not query segment {} ({}:{})'.format(
                     primary.dbid, primary.hostname, primary.port
             ))

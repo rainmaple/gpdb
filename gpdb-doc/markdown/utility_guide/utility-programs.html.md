@@ -36,12 +36,10 @@ Greenplum Database provides the following utility programs. Superscripts identif
 - [gpkafka](https://docs.vmware.com/en/VMware-Greenplum-Streaming-Server/index.html)<sup>4</sup>
 - [gpload](ref/gpload.html)<sup>3</sup>
 - [gplogfilter](ref/gplogfilter.html)
-- [gpmapreduce](ref/gpmapreduce.html)
-- [gpmapreduce.yaml](ref/gpmapreduce-yaml.html)
 - [gpmovemirrors](ref/gpmovemirrors.html)
 - [gpsupport](ref/gpsupport.html)
 - [gppkg](ref/gppkg.html)
-- [gpcr](https://docs.vmware.com/en/VMware-Greenplum-Cluster-Recovery/1.0/greenplum-cluster-recovery/GUID-ref-gpcr.html)
+- [gpdr](https://docs.vmware.com/en/VMware-Greenplum-Disaster-Recovery/1.0/greenplum-disaster-recovery/GUID-ref-gpdr.html)
 - [gprecoverseg](ref/gprecoverseg.html)
 - [gpreload](ref/gpreload.html)
 - [gprestore](https://docs.vmware.com/en/VMware-Greenplum-Backup-and-Restore/index.html)<sup>1</sup>
@@ -52,10 +50,15 @@ Greenplum Database provides the following utility programs. Superscripts identif
 - [gpstate](ref/gpstate.html)
 - [gpstop](ref/gpstop.html)
 - [gpsync](ref/gpsync.html)
+- [gpv](ref/gpv.html)
 - [pg\_config](ref/pg_config.html)
 - [pg\_dump](ref/pg_dump.html)<sup>3</sup>
 - [pg\_dumpall](ref/pg_dumpall.html)<sup>3</sup>
+- [pg_filedump](ref/pg_filedump.html)
 - [pg\_restore](ref/pg_restore.html)
+- [pgbouncer](ref/pgbouncer.html)
+- [pgbouncer.ini](ref/pgbouncer-ini.html)
+- [pgbouncer-admin](ref/pgbouncer-admin.html)
 - [plcontainer](ref/plcontainer.html)
 - [plcontainer Configuration File](ref/plcontainer-configuration.html)
 - [psql](ref/psql.html)<sup>3</sup>

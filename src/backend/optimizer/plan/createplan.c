@@ -277,9 +277,6 @@ static MergeJoin *make_mergejoin(List *tlist,
 								 Plan *lefttree, Plan *righttree,
 								 JoinType jointype, bool inner_unique,
 								 bool skip_mark_restore);
-static Sort *make_sort(Plan *lefttree, int numCols,
-					   AttrNumber *sortColIdx, Oid *sortOperators,
-					   Oid *collations, bool *nullsFirst);
 static Plan *prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 										Relids relids,
 										const AttrNumber *reqColIdx,
@@ -329,8 +326,6 @@ static Motion *cdbpathtoplan_create_motion_plan(PlannerInfo *root,
 								 CdbMotionPath *path,
 								 Plan *subplan);
 static void append_initplan_for_function_scan(PlannerInfo *root, Path *best_path, Plan *plan);
-static bool contain_motion(PlannerInfo *root, Node *node);
-static bool contain_motion_walk(Node *node, contain_motion_walk_context *ctx);
 
 /*
  * create_plan
@@ -1004,6 +999,16 @@ use_physical_tlist(PlannerInfo *root, Path *path, int flags)
 		}
 	}
 
+	/* 
+	 * Greenplum specific code: when generating scan plan in create_scan_plan(),
+	 * the upstream code prefer to generate a tlist containing all Vars in
+	 * order. For the AO-type storage, it would result into unnecessary
+	 * overhead and impact performance, so in this case we let the tlist apply
+	 * to the projection to avoid unnecessory column fetches.
+	 */
+	if (rel->relam == AO_ROW_TABLE_AM_OID || rel->relam == AO_COLUMN_TABLE_AM_OID)
+		return false;
+
 	return true;
 }
 
@@ -1125,37 +1130,7 @@ create_join_plan(PlannerInfo *root, JoinPath *best_path)
 	 * risk for motion deadlock.
 	 */
 	if (CdbPathLocus_IsBottleneck(best_path->path.locus))
-	{
 		((Join *) plan)->prefetch_inner = false;
-		((Join *) plan)->prefetch_joinqual = false;
-		((Join *) plan)->prefetch_qual = false;
-	}
-
-	/*
-	 * We may set prefetch_joinqual to true if there is
-	 * potential risk when create_xxxjoin_plan. Here, we
-	 * have all the information at hand, this is the final
-	 * logic to set prefetch_joinqual.
-	 */
-	if (((Join *) plan)->prefetch_joinqual)
-	{
-		List *joinqual = ((Join *) plan)->joinqual;
-
-		((Join *) plan)->prefetch_joinqual = contain_motion(root,
-															(Node *) joinqual);
-	}
-
-	/*
-	 * Similar for non join qual. If it contains a motion and outer relation
-	 * also contains a motion, then we should set prefetch_qual to true.
-	 */
-	if (((Join *) plan)->prefetch_qual)
-	{
-		List *qual = ((Join *) plan)->plan.qual;
-
-		((Join *) plan)->prefetch_qual = contain_motion(root,
-															(Node *) qual);
-	}
 
 	/*
 	 * If there are any pseudoconstant clauses attached to this node, insert a
@@ -2136,7 +2111,7 @@ create_projection_plan(PlannerInfo *root, ProjectionPath *best_path, int flags)
 	 * https://github.com/greenplum-db/gpdb/issues/9874 for more
 	 * detailed info.
 	 */
-	if (best_path->direct_dispath_contentIds)
+	if (root->config->gp_enable_direct_dispatch && best_path->direct_dispath_contentIds)
 	{
 		DirectDispatchInfo dispatchInfo;
 
@@ -2845,6 +2820,11 @@ create_recursiveunion_plan(PlannerInfo *root, RecursiveUnionPath *best_path)
 								best_path->distinctList,
 								numGroups);
 
+	/*
+	 * Check whether there is a motion above WorkTableScan
+	 */
+	checkMotionAboveWorkTableScan((Node *)rightplan, root);
+
 	copy_generic_path_info(&plan->plan, (Path *) best_path);
 
 	return plan;
@@ -3126,13 +3106,23 @@ create_motion_plan(PlannerInfo *root, CdbMotionPath *path)
 			break;
 
 		case CdbLocusType_SingleQE:
-			sendSlice->gangType = GANGTYPE_SINGLETON_READER;
-			sendSlice->numsegments = 1;
-			sendSlice->segindex = gp_session_id % subpath->locus.numsegments;
-			break;
+			{
+				int gp_segment_count = getgpsegmentCount();
+				sendSlice->gangType = GANGTYPE_SINGLETON_READER;
+				sendSlice->numsegments = 1;
+				/*
+				 * sendSlice->segindex must be smaller than the number of gpdb actual segments.
+				 *
+				 * For foreign table, subpath->locus.numsegments might be larger than the number of
+				 * gpdb actual segments.
+				 *
+				 * So we need to use the minimum of numsegments and getgpsegmentCount() here.
+				 */
+				sendSlice->segindex = gp_session_id % Min(subpath->locus.numsegments, gp_segment_count);
+				break;
+			}
 
 		case CdbLocusType_General:
-			/*  */
 			sendSlice->gangType = GANGTYPE_SINGLETON_READER;
 			sendSlice->numsegments = 1;
 			sendSlice->segindex = gp_session_id % getgpsegmentCount();
@@ -5020,27 +5010,6 @@ create_nestloop_plan(PlannerInfo *root,
 	if (partition_selectors_created)
 		join_plan->join.prefetch_inner = true;
 
-	/*
-	 * A motion deadlock can also happen when outer and joinqual both contain
-	 * motions.  It is not easy to check for joinqual here, so we set the
-	 * prefetch_joinqual mark only according to outer motion, and check for
-	 * joinqual later in the executor.
-	 *
-	 * See ExecPrefetchJoinQual() for details.
-	 */
-	if (best_path->outerjoinpath &&
-		best_path->outerjoinpath->motionHazard &&
-		join_plan->join.joinqual != NIL)
-		join_plan->join.prefetch_joinqual = true;
-
-	/*
-	 * Similar for non join qual.
-	 */
-	if (best_path->outerjoinpath &&
-		best_path->outerjoinpath->motionHazard &&
-		join_plan->join.plan.qual != NIL)
-		join_plan->join.prefetch_qual = true;
-
 	return join_plan;
 }
 
@@ -5393,35 +5362,6 @@ create_mergejoin_plan(PlannerInfo *root,
 	if (partition_selectors_created)
 		join_plan->join.prefetch_inner = true;
 
-	/*
-	 * A motion deadlock can also happen when outer and joinqual both contain
-	 * motions.  It is not easy to check for joinqual here, so we set the
-	 * prefetch_joinqual mark only according to outer motion, and check for
-	 * joinqual later in the executor.
-	 *
-	 * See ExecPrefetchJoinQual() for details.
-	 */
-	if (best_path->jpath.outerjoinpath &&
-		best_path->jpath.outerjoinpath->motionHazard &&
-		join_plan->join.joinqual != NIL)
-		join_plan->join.prefetch_joinqual = true;
-	/*
-	 * If inner motion is not under a Material or Sort node then there could
-	 * also be motion deadlock between inner and joinqual in mergejoin.
-	 */
-	if (best_path->jpath.innerjoinpath &&
-		best_path->jpath.innerjoinpath->motionHazard &&
-		join_plan->join.joinqual != NIL)
-		join_plan->join.prefetch_joinqual = true;
-
-	/*
-	 * Similar for non join qual.
-	 */
-	if (best_path->jpath.innerjoinpath &&
-		best_path->jpath.innerjoinpath->motionHazard &&
-		join_plan->join.plan.qual != NIL)
-		join_plan->join.prefetch_qual = true;
-
 	/* Costs of sort and material steps are included in path cost already */
 	copy_generic_path_info(&join_plan->join.plan, &best_path->jpath.path);
 
@@ -5634,27 +5574,6 @@ create_hashjoin_plan(PlannerInfo *root,
 	 */
 	if (partition_selectors_created)
 		join_plan->join.prefetch_inner = true;
-
-	/*
-	 * A motion deadlock can also happen when outer and joinqual both contain
-	 * motions.  It is not easy to check for joinqual here, so we set the
-	 * prefetch_joinqual mark only according to outer motion, and check for
-	 * joinqual later in the executor.
-	 *
-	 * See ExecPrefetchJoinQual() for details.
-	 */
-	if (best_path->jpath.outerjoinpath &&
-		best_path->jpath.outerjoinpath->motionHazard &&
-		join_plan->join.joinqual != NIL)
-		join_plan->join.prefetch_joinqual = true;
-
-	/*
-	 * Similar for non join qual.
-	 */
-	if (best_path->jpath.outerjoinpath &&
-		best_path->jpath.outerjoinpath->motionHazard &&
-		join_plan->join.plan.qual != NIL)
-		join_plan->join.prefetch_qual = true;
 
 	copy_generic_path_info(&join_plan->join.plan, &best_path->jpath.path);
 
@@ -6814,7 +6733,7 @@ make_mergejoin(List *tlist,
  * Caller must have built the sortColIdx, sortOperators, collations, and
  * nullsFirst arrays already.
  */
-static Sort *
+Sort *
 make_sort(Plan *lefttree, int numCols,
 		  AttrNumber *sortColIdx, Oid *sortOperators,
 		  Oid *collations, bool *nullsFirst)
@@ -8170,13 +8089,9 @@ cdbpathtoplan_create_motion_plan(PlannerInfo *root,
 									hashOpfamilies,
 									numHashSegments);
 	}
-	else if (CdbPathLocus_IsOuterQuery(path->path.locus))
-	{
-		motion = make_union_motion(subplan);
-		motion->motionType = MOTIONTYPE_OUTER_QUERY;
-	}
 	/* Send all tuples to a single process? */
-	else if (CdbPathLocus_IsBottleneck(path->path.locus))
+	else if (CdbPathLocus_IsBottleneck(path->path.locus)
+			|| CdbPathLocus_IsOuterQuery(path->path.locus))
 	{
 		if (path->path.pathkeys)
 		{
@@ -8231,6 +8146,13 @@ cdbpathtoplan_create_motion_plan(PlannerInfo *root,
 		{
 			motion = make_union_motion(subplan);
 		}
+		/*
+		 * When path.locus is CdbLocusType_OuterQuery, We will miss the pathkeys
+		 * if use make_union_motion. So use make_sorted_union_motion instead of
+		 * make_union_motion if path has pathkeys.
+		 */
+		if (CdbPathLocus_IsOuterQuery(path->path.locus))
+			motion->motionType = MOTIONTYPE_OUTER_QUERY;
 	}
 
 	/* Send all of the tuples to all of the QEs in gang above... */
@@ -8305,8 +8227,12 @@ append_initplan_for_function_scan(PlannerInfo *root, Path *best_path, Plan *plan
 	if (Gp_role != GP_ROLE_DISPATCH)
 		return;
 
+	/* Current function scan is already in an initplan, do nothing. */
+	if (!get_allow_append_initplan_for_function_scan())
+		return;
+
 	/*
-	 * If INITPLAN function is executed on QD, there is no 
+	 * If INITPLAN function is executed on QD, there is no
 	 * need to add additional initplan to run this function.
 	 * Recall that the reason to introduce INITPLAN function
 	 * is that function runing on QE can not do dispatch.
@@ -8391,58 +8317,3 @@ append_initplan_for_function_scan(PlannerInfo *root, Path *best_path, Plan *plan
 	initplan->scan.plan.flow = cdbpathtoplan_create_flow(root, best_path->locus);
 }
 
-/*
- * contain_motion
- * This function walks the joinqual list to  see there is
- * any motion node in it. The only case a qual contains motion
- * is that it is a SubPlan and the SubPlan contains motion.
- */
-static bool
-contain_motion(PlannerInfo *root, Node *node)
-{
-	contain_motion_walk_context ctx;
-	planner_init_plan_tree_base(&ctx.base, root);
-	ctx.result = false;
-	ctx.seen_subplans = NULL;
-
-	(void) contain_motion_walk(node, &ctx);
-
-	return ctx.result;
-}
-
-static bool
-contain_motion_walk(Node *node, contain_motion_walk_context *ctx)
-{
-	PlannerInfo *root = (PlannerInfo *) ctx->base.node;
-
-	if (ctx->result)
-		return true;
-
-	if (node == NULL)
-		return false;
-
-	if (IsA(node, SubPlan))
-	{
-		SubPlan	   *spexpr = (SubPlan *) node;
-		int			plan_id = spexpr->plan_id;
-
-		if (!bms_is_member(plan_id, ctx->seen_subplans))
-		{
-			ctx->seen_subplans = bms_add_member(ctx->seen_subplans, plan_id);
-
-			if (spexpr->is_initplan)
-				return false;
-
-			Plan *plan = list_nth(root->glob->subplans, plan_id - 1);
-			return plan_tree_walker((Node *) plan, contain_motion_walk, ctx, true);
-		}
-	}
-
-	if (IsA(node, Motion))
-	{
-		ctx->result = true;
-		return true;
-	}
-
-	return plan_tree_walker((Node *) node, contain_motion_walk, ctx, true);
-}

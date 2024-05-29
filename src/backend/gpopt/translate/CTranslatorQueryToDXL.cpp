@@ -293,7 +293,6 @@ CTranslatorQueryToDXL::CheckUnsupportedNodeTypes(Query *query)
 	static const SUnsupportedFeature unsupported_features[] = {
 		{T_RowExpr, GPOS_WSZ_LIT("ROW EXPRESSION")},
 		{T_RowCompareExpr, GPOS_WSZ_LIT("ROW COMPARE")},
-		{T_FieldSelect, GPOS_WSZ_LIT("FIELDSELECT")},
 		{T_FieldStore, GPOS_WSZ_LIT("FIELDSTORE")},
 		{T_CoerceToDomainValue, GPOS_WSZ_LIT("COERCETODOMAINVALUE")},
 		{T_GroupId, GPOS_WSZ_LIT("GROUPID")},
@@ -467,19 +466,100 @@ CTranslatorQueryToDXL::CheckRangeTable(Query *query)
 	{
 		RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
 
-		if (rte->security_barrier || rte->securityQuals)
+		if (rte->security_barrier)
 		{
 			GPOS_ASSERT(RTE_SUBQUERY == rte->rtekind);
 			// otherwise ORCA most likely pushes potentially leaky filters down
 			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
 					   GPOS_WSZ_LIT("views with security_barrier ON"));
 		}
+
+		// In a rewritten parse tree
+		//
+		// [1] When hasRowSecurity=false and security_quals are not
+		// present in an rte, means that the relations present in a
+		// query don't have row level security enabled.
+		//
+		// [2] When hasRowSecurity=true and security_quals are present
+		// in an rte, means that the relations present in a query have
+		// row level security enabled.
+		//
+		// [3] When hasRowSecurity=true and security_quals are not
+		// present in an rte, means that the relations present in
+		// a query have row level security enabled but the query is
+		// executed by the owner of the relation.
+		//
+		// [4] When hasRowSecurity=false and security_quals are
+		// present in an rte example: A view with security barrier
+		// enabled and the view contains a relation with rules.
+		// Example query is below
+		//
+		// ```SQL
+		// CREATE TABLE foo(id int PRIMARY KEY, data text, deleted boolean);
+		// CREATE RULE foo_del_rule AS ON DELETE TO foo DO INSTEAD UPDATE foo SET deleted = true WHERE id = old.id;
+		// CREATE VIEW rw_view1 WITH (security_barrier=true) AS SELECT id, data FROM foo WHERE NOT deleted;
+		// DELETE FROM rw_view1 WHERE id = 1;
+		// ```
+		// ORCA will fallback to planner for this case [4].
+		if (!query->hasRowSecurity && nullptr != rte->securityQuals)
+		{
+			GPOS_RAISE(
+				gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
+				GPOS_WSZ_LIT(
+					"Security quals present in RTE without row level security enabled"));
+		}
+
+		// ORCA will fallback to planner if row level security is
+		// enabled for a relation and the security quals contain
+		// sublinks.
+		if (query->hasRowSecurity && query->hasSubLinks &&
+			0 < gpdb::ListLength(rte->securityQuals) &&
+			CheckSublinkInSecurityQuals((Node *) rte->securityQuals, nullptr))
+		{
+			GPOS_RAISE(
+				gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
+				GPOS_WSZ_LIT(
+					"Query has row level security enabled and security quals contain sublinks"));
+		}
+
 		if (rte->tablesample)
 		{
 			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
 					   GPOS_WSZ_LIT("TABLESAMPLE in the FROM clause"));
 		}
 	}
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorQueryToDXL::CheckSublinkInSecurityQuals
+//
+//	@doc:
+//		When row level security is enabled we add the security quals
+//		while translating the table scans from DXL To Planned Statement.
+//		If the security quals consists of SUBLINKS then those queries
+//		will not have been planned as we add them at the end during
+//		translation. So falling back to planner for such cases. This walker
+// 		is used to find if we have any sublinks present in the security quals.
+//
+//---------------------------------------------------------------------------
+
+BOOL
+CTranslatorQueryToDXL::CheckSublinkInSecurityQuals(Node *node, void *context)
+{
+	if (nullptr == node)
+	{
+		return false;
+	}
+
+	if (IsA(node, SubLink))
+	{
+		return true;
+	}
+
+	return gpdb::WalkExpressionTree(
+		node, (BOOL(*)()) CTranslatorQueryToDXL::CheckSublinkInSecurityQuals,
+		context);
 }
 
 //---------------------------------------------------------------------------
@@ -1375,7 +1455,7 @@ CTranslatorQueryToDXL::UpdatedColumnMapping()
 
 	ListCell *lc = nullptr;
 	ULONG ul = 0;
-	ULONG output_columns = 0;
+	ULONG output_columns GPOS_ASSERTS_ONLY = 0;
 	ForEach(lc, m_query->targetList)
 	{
 		TargetEntry *target_entry = (TargetEntry *) lfirst(lc);
@@ -2405,6 +2485,7 @@ CTranslatorQueryToDXL::CheckNoDuplicateAliasGroupingColumn(List *target_list,
 	if (gpdb::ListLength(processed_list) < 1)
 	{
 		// no duplicates if no duplicates found in target list
+		bitset->Release();
 		return;
 	}
 
@@ -2441,6 +2522,7 @@ CTranslatorQueryToDXL::CheckNoDuplicateAliasGroupingColumn(List *target_list,
 			}
 		}
 	}
+	bitset->Release();
 }
 
 //---------------------------------------------------------------------------
@@ -3262,6 +3344,12 @@ CTranslatorQueryToDXL::TranslateFromClauseToDXL(Node *node)
 					   GPOS_WSZ_LIT("LATERAL"));
 		}
 
+		if (rte->funcordinality)
+		{
+			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
+					   GPOS_WSZ_LIT("WITH ORDINALITY"));
+		}
+
 		switch (rte->rtekind)
 		{
 			default:
@@ -3373,6 +3461,9 @@ CTranslatorQueryToDXL::TranslateRTEToDXLLogicalGet(const RangeTblEntry *rte,
 				   GPOS_WSZ_LIT("ONLY in the FROM clause"));
 	}
 
+
+	BOOL rteHasSecurityQuals = gpdb::ListLength(rte->securityQuals) > 0;
+
 	// query_id_for_target_rel is used to tag table descriptors assigned to target
 	// (result) relations one. In case of possible nested DML subqueries it's
 	// field points to target relation of corresponding Query structure of subquery.
@@ -3397,7 +3488,8 @@ CTranslatorQueryToDXL::TranslateRTEToDXLLogicalGet(const RangeTblEntry *rte,
 	}
 	else
 	{
-		dxl_op = GPOS_NEW(m_mp) CDXLLogicalGet(m_mp, dxl_table_descr);
+		dxl_op = GPOS_NEW(m_mp)
+			CDXLLogicalGet(m_mp, dxl_table_descr, rteHasSecurityQuals);
 	}
 
 	CDXLNode *dxl_node = GPOS_NEW(m_mp) CDXLNode(m_mp, dxl_op);

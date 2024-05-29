@@ -11,6 +11,7 @@ from steps.gpconfig_mgmt_utils import GpConfigContext
 from steps.gpssh_exkeys_mgmt_utils import GpsshExkeysMgmtContext
 from steps.mgmt_utils import backup_bashrc, restore_bashrc
 from gppylib.db import dbconn
+from gppylib.commands.base import Command, REMOTE
 
 def before_all(context):
     if list(map(int, behave.__version__.split('.'))) < [1,2,6]:
@@ -62,12 +63,21 @@ def before_feature(context, feature):
         dbconn.execSQL(context.conn, 'create table t1(a integer, b integer)')
         dbconn.execSQL(context.conn, 'create table t2(c integer, d integer)')
         dbconn.execSQL(context.conn, 'create table t3(e integer, f integer)')
+        dbconn.execSQL(context.conn, 'create table spiegelungssätze(col_ä integer, 列2 integer)')
         dbconn.execSQL(context.conn, 'create view v1 as select a, b from t1, t3 where t1.a=t3.e')
         dbconn.execSQL(context.conn, 'create view v2 as select c, d from t2, t3 where t2.c=t3.f')
         dbconn.execSQL(context.conn, 'create view v3 as select a, d from v1, v2 where v1.a=v2.c')
         dbconn.execSQL(context.conn, 'insert into t1 values(1, 2)')
         dbconn.execSQL(context.conn, 'insert into t2 values(1, 3)')
         dbconn.execSQL(context.conn, 'insert into t3 values(1, 4)')
+        dbconn.execSQL(context.conn, 'insert into spiegelungssätze values(1, 5)')
+        # minirepro tests require statistical data about the contents of the database
+        # we should execute 'ANALYZE' to fill the pg_statistic catalog table.
+        dbconn.execSQL(context.conn, 'analyze t1')
+        dbconn.execSQL(context.conn, 'analyze t2')
+        dbconn.execSQL(context.conn, 'analyze t3')
+        dbconn.execSQL(context.conn, 'analyze spiegelungssätze')
+        dbconn.execSQL(context.conn, 'create or replace function select_one() returns integer as $$ select 1 $$ language sql')
         context.conn.commit()
 
 def after_feature(context, feature):
@@ -149,6 +159,12 @@ def after_scenario(context, scenario):
             os.chmod(context.temp_base_dir, 0o700)
             shutil.rmtree(context.temp_base_dir)
 
+        if 'umount_required' in context and context.umount_required:
+            context.execute_steps('''
+                        # unmounting all mounter filesystem in concourse cluster
+                        Then umount all mounted filesystem
+                        ''')
+
     tags_to_not_restart_db = ['analyzedb', 'gpssh-exkeys']
     if not set(context.feature.tags).intersection(tags_to_not_restart_db):
         start_database_if_not_started(context)
@@ -183,3 +199,10 @@ def after_scenario(context, scenario):
 
     if os.getenv('SUSPEND_PG_REWIND') is not None:
         del os.environ['SUSPEND_PG_REWIND']
+
+    if "remove_rsync_bash" in scenario.effective_tags:
+        for host in context.hosts_with_rsync_bash:
+            cmd = Command(name='remove /usr/local/bin/rsync', cmdStr="sudo rm /usr/local/bin/rsync", remoteHost=host,
+                          ctxt=REMOTE)
+            cmd.run(validateAfter=True)
+
